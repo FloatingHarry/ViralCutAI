@@ -2,6 +2,10 @@
 
 Agent-based AIGC commerce video workspace for the AI full-stack challenge.
 
+## Overview
+
+ViralCutAI turns product assets, viral ecommerce references, AI generation, shot-level editing, and performance attribution into one reviewable workflow. It is designed for ecommerce teams that need to create short-form product videos, regenerate weak shots, assemble an MP4, and learn which creative factors worked.
+
 ## Stack
 
 - Frontend: Next.js App Router, React, TypeScript, Tailwind CSS
@@ -9,6 +13,26 @@ Agent-based AIGC commerce video workspace for the AI full-stack challenge.
 - Agent runtime: LangGraph generation graph and experiment analysis graph
 - Data: PostgreSQL ORM tables for assets, viral factors, generation runs, artifacts, traces, and experiments
 - Providers: automatic Volcengine text/image, Seedance video, and FastMoss market-data calls, with local placeholders only for capabilities that are not connected
+
+## Visual Overview
+
+### Product Experience
+
+![ViralCutAI product experience concept](docs/readme-assets/product-concept.png)
+
+Product experience concept for the five main workspaces: My Assets, Viral Library, Studio, Editor, and Analytics. This image is a product overview illustration; the live local UI is shown through the runnable app and demo video.
+
+### System Architecture
+
+![ViralCutAI system architecture](docs/readme-assets/system-architecture.png)
+
+The app uses a separated Next.js frontend and FastAPI backend, with LangGraph agent orchestration, PostgreSQL persistence, provider integrations, and trace records through RunEvent and AgentStep.
+
+### Agent Process
+
+![ViralCutAI agent process](docs/readme-assets/agent-process.png)
+
+The generation pipeline combines product assets, viral references, factors, and platform settings, then records provider state, JSON repair, and real failure handling as side channels.
 
 ## Quick Start
 
@@ -89,44 +113,6 @@ Open:
 - `POST /experiments/analyze`
 - `GET /experiments`
 - `GET /experiments/{experiment_id}`
-
-## Agent Graphs
-
-```mermaid
-flowchart LR
-  A["My Assets + external Viral Library + product input"] --> B["Viral Strategy Agent"]
-  B --> C{"Factor coverage OK?"}
-  C -- no --> B
-  C -- yes --> D["Script & Storyboard Agent"]
-  D --> E["Render & Review Agent"]
-  E --> F{"Compliance passed?"}
-  F -- no --> D
-  F -- yes --> G["Preview + export + artifacts"]
-```
-
-```mermaid
-flowchart LR
-  A["2-4 Generation Runs"] --> B["Attribution & Experiment Agent"]
-  B --> C["Variant metrics"]
-  B --> D["Factor attribution"]
-  B --> E["Next iteration recommendation"]
-```
-
-## Data Model
-
-```mermaid
-erDiagram
-  ASSET_COLLECTION ||--o{ ASSET : groups
-  ASSET ||--o{ ASSET_SLICE : has
-  ASSET ||--o{ ASSET_TAG : has
-  ASSET ||--o| ASSET_EMBEDDING : has
-  GENERATION_RUN ||--o{ SOURCE_ASSET : uses
-  GENERATION_RUN ||--o{ RUN_EVENT : records
-  GENERATION_RUN ||--o{ AGENT_STEP : traces
-  GENERATION_RUN ||--o{ MEDIA_ARTIFACT : outputs
-  EXPERIMENT_ANALYSIS ||--o{ EXPERIMENT_VARIANT : compares
-  EXPERIMENT_ANALYSIS ||--o{ FACTOR_ATTRIBUTION : explains
-```
 
 ## Requirement Coverage
 

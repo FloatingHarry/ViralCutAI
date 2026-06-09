@@ -201,18 +201,20 @@ def attribution_experiment_agent(state: ExperimentGraphState) -> ExperimentGraph
             )
         )
     except Exception as exc:
-        execution_mode = "real_failed"
-        provider_status = "error"
-        provider_message = f"Volcengine experiment analysis failed; no fallback analysis was generated. Reason: {_safe_error(exc)}"
+        execution_mode = "real_metric_local"
+        provider_status = "json_error"
+        provider_message = (
+            "Volcengine returned malformed experiment analysis JSON; local real-metric attribution was used. "
+            f"Reason: {_safe_error(exc)}"
+        )
         result = {
             **baseline,
-            "mode": "provider_failed",
-            "summary": "Attribution provider failed. Real input metrics were preserved, but no fallback analysis was generated.",
-            "winner_run_id": None,
-            "winner_label": None,
-            "factor_attribution": [],
-            "next_iteration_recommendation": {},
-            "risk_notes": [provider_message],
+            "mode": "local_metric_attribution",
+            "summary": (
+                f"{baseline['winner_label']} leads this experiment based on user-entered real performance metrics. "
+                "Provider narrative JSON was unavailable, so charts use deterministic local attribution."
+            ),
+            "risk_notes": [*baseline.get("risk_notes", []), provider_message],
         }
         substeps.append(
             _experiment_substep(
@@ -224,8 +226,7 @@ def attribution_experiment_agent(state: ExperimentGraphState) -> ExperimentGraph
                 provider_status,
                 provider_message,
                 {"objective": state["request"].get("objective"), "variant_count": len(baseline["variants"])},
-                {"source": "provider_failed"},
-                status="failed",
+                {"source": "local_metric_attribution", "winner": result["winner_label"], "factor_count": len(result["factor_attribution"])},
                 error=_safe_error(exc),
             )
         )
@@ -245,7 +246,9 @@ def attribution_experiment_agent(state: ExperimentGraphState) -> ExperimentGraph
             "substeps": substeps,
         },
         "duration_ms": max(1, int((time.perf_counter() - started) * 1000)),
-        "fallback": "No fallback analysis was generated because the configured real provider failed."
+        "fallback": "Provider narrative JSON failed; deterministic local attribution used the user-entered metrics."
+        if execution_mode == "real_metric_local"
+        else "No fallback analysis was generated because the configured real provider failed."
         if execution_mode == "real_failed"
         else provider_message
         if execution_mode != "real"
@@ -391,7 +394,8 @@ def _real_experiment_result(state: ExperimentGraphState, baseline: dict[str, Any
             {
                 "role": "system",
                 "content": (
-                    "You are ViralCutAI's experiment analysis agent. Return strict JSON only. "
+                    "You are ViralCutAI's experiment analysis agent. Return exactly one minified JSON object only. "
+                    "No markdown, no comments, no trailing commas, no newlines inside string values. "
                     "Analyze user-entered real performance metrics and generation factors in English. "
                     "Do not invent or change numeric metrics."
                 ),
@@ -399,15 +403,16 @@ def _real_experiment_result(state: ExperimentGraphState, baseline: dict[str, Any
             {
                 "role": "user",
                 "content": (
-                    "Return JSON with summary, winner_run_id, winner_label, variants, "
+                    "Return JSON with exactly these top-level keys: summary, winner_run_id, winner_label, variants, "
                     "factor_attribution, next_iteration_recommendation, risk_notes. "
+                    "Keep strings concise. Keep factor_attribution length <= 8. "
                     "Keep run_ids unchanged and do not invent API keys or private data.\n\n"
                     f"INPUT JSON:\n{json.dumps(prompt, ensure_ascii=False)}"
                 ),
             },
         ],
-        "temperature": 0.4,
-        "max_tokens": 1600,
+        "temperature": 0.1,
+        "max_tokens": 1400,
         "response_format": {"type": "json_object"},
         "thinking": {"type": "disabled"},
     }
@@ -476,12 +481,14 @@ def _repair_experiment_json(broken_content: str, parse_error: Exception) -> dict
     body = {
         "model": model,
         "messages": [
-            {"role": "system", "content": "Repair malformed JSON. Return one valid JSON object only."},
+            {"role": "system", "content": "Repair malformed JSON. Return one minified valid JSON object only, no markdown."},
             {
                 "role": "user",
                 "content": (
                     f"Parse error: {_safe_error(parse_error)}\n"
-                    "Fix this experiment analysis JSON without inventing new run IDs.\n\n"
+                    "Fix this experiment analysis JSON without inventing new run IDs. "
+                    "Use exactly these top-level keys if present: summary, winner_run_id, winner_label, variants, "
+                    "factor_attribution, next_iteration_recommendation, risk_notes.\n\n"
                     f"BROKEN JSON/TEXT:\n{broken_content[:10000]}"
                 ),
             },

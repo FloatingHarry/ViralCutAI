@@ -17,7 +17,11 @@ class ProviderExecutionError(RuntimeError):
 
 
 EDITING_SHOT_COUNT = 3
+MAX_EDITING_SHOT_COUNT = 3
 SHOT_CLIP_DURATION_SECONDS = 4
+MAX_TIMELINE_DURATION_SECONDS = 12
+FACTOR_CATEGORIES = ("hook", "proof", "scene", "trust", "visual", "audio", "cta", "risk")
+SEGMENT_BEATS = ("Hook", "Proof + Use", "CTA")
 
 
 class GenerationGraphState(TypedDict, total=False):
@@ -46,6 +50,31 @@ def _short(text: str, fallback: str) -> str:
     return value if value else fallback
 
 
+def _valid_short_sentence(value: Any, *, min_chars: int = 10, max_chars: int = 220) -> bool:
+    if not isinstance(value, str):
+        return False
+    text = re.sub(r"\s+", " ", value).strip()
+    if len(text) < min_chars or len(text) > max_chars:
+        return False
+    return not re.fullmatch(r"[-+]?\d+(?:\.\d+)?%?", text)
+
+
+def _limit_text(value: Any, length: int, fallback: str = "") -> str:
+    text = re.sub(r"\s+", " ", str(value or fallback)).strip()
+    if len(text) <= length:
+        return text
+    return text[: max(0, length - 1)].rstrip() + "..."
+
+
+def _response_excerpt(content: str) -> str:
+    text = re.sub(r"\s+", " ", str(content or "")).strip()
+    if not text:
+        return "empty response"
+    if len(text) <= 420:
+        return text
+    return f"{text[:210]} ... {text[-210:]}"
+
+
 def _asset_summary(request: dict[str, Any]) -> str:
     assets = request.get("source_assets") or []
     retrieval = request.get("retrieval_context") or {}
@@ -61,10 +90,11 @@ def _asset_summary(request: dict[str, Any]) -> str:
 
 
 def _shot_durations(total_seconds: int, shot_count: int = EDITING_SHOT_COUNT) -> list[int]:
-    total = max(shot_count, int(total_seconds or 12))
-    base = total // shot_count
-    remainder = total % shot_count
-    return [base + (1 if index < remainder else 0) for index in range(shot_count)]
+    count = max(1, min(int(shot_count or EDITING_SHOT_COUNT), MAX_EDITING_SHOT_COUNT))
+    total = max(count, min(int(total_seconds or 12), MAX_TIMELINE_DURATION_SECONDS))
+    base = total // count
+    remainder = total % count
+    return [base + (1 if index < remainder else 0) for index in range(count)]
 
 
 def _text_provider_configured() -> bool:
@@ -103,6 +133,32 @@ def _provider_retry_delay_seconds(exc: Exception, attempt: int) -> int:
     return attempt
 
 
+def _text_task_temperature(task: str) -> float:
+    if task in {"strategy_brief", "factor_board_packaging", "copy_draft", "storyboard_plan", "prompt_package", "segment_rewrite"}:
+        return 0.1
+    return 0.35
+
+
+def _text_task_max_tokens(task: str) -> int:
+    if task == "strategy_brief":
+        return 800
+    if task == "factor_board_packaging":
+        return 1300
+    if task == "copy_draft":
+        return 900
+    if task == "storyboard_plan":
+        return 1100
+    if task == "prompt_package":
+        return 850
+    if task == "script_storyboard":
+        return 2200
+    if task == "segment_rewrite":
+        return 900
+    if task == "viral_strategy":
+        return 1700
+    return 1800
+
+
 def _join_api_url(base_url: str, path: str) -> str:
     base = base_url.rstrip("/")
     suffix = path if path.startswith("/") else f"/{path}"
@@ -124,19 +180,54 @@ def _raise_for_status(response: httpx.Response, context: str) -> None:
         raise RuntimeError(f"{context} failed with HTTP {response.status_code}: {detail}") from exc
 
 
+def _is_retryable_seedance_error(exc: Exception) -> bool:
+    if isinstance(exc, httpx.TransportError):
+        return True
+    message = str(exc)
+    return "HTTP 429" in message or "HTTP 500" in message or "HTTP 502" in message or "HTTP 503" in message or "HTTP 504" in message
+
+
+def _json_control_safe_text(text: str) -> str:
+    cleaned: list[str] = []
+    in_string = False
+    escaped = False
+    for char in text:
+        code = ord(char)
+        if escaped:
+            cleaned.append("n" if code < 32 else char)
+            escaped = False
+            continue
+        if char == "\\" and in_string:
+            cleaned.append(char)
+            escaped = True
+            continue
+        if char == '"':
+            in_string = not in_string
+            cleaned.append(char)
+            continue
+        if code < 32:
+            if in_string:
+                cleaned.append(" ")
+            elif char in "\r\n\t":
+                cleaned.append(char)
+            continue
+        cleaned.append(char)
+    return "".join(cleaned)
+
+
 def _extract_json_object(content: str) -> dict[str, Any]:
     text = content.strip()
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?", "", text, flags=re.IGNORECASE).strip()
         text = re.sub(r"```$", "", text).strip()
-    text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", text)
+    text = _json_control_safe_text(text)
     try:
         parsed = json.loads(text)
     except json.JSONDecodeError:
         match = re.search(r"\{.*\}", text, re.DOTALL)
         if not match:
             raise ValueError("Provider response did not contain a JSON object.") from None
-        parsed = json.loads(re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", match.group(0)))
+        parsed = json.loads(_json_control_safe_text(match.group(0)))
     if not isinstance(parsed, dict):
         raise ValueError("Provider response JSON was not an object.")
     return parsed
@@ -193,6 +284,9 @@ def _compact_retrieval_context(retrieval: dict[str, Any]) -> dict[str, Any]:
         "evidence_summary": retrieval.get("evidence_summary"),
         "selected_collection": retrieval.get("selected_collection"),
         "methodology_summary": retrieval.get("methodology_summary"),
+        "reference_match_mode": retrieval.get("reference_match_mode"),
+        "reference_match_reason": retrieval.get("reference_match_reason"),
+        "selected_reference_video": _compact_reference_for_llm(retrieval.get("selected_reference_video")),
         "auto_asset_results": [
             {
                 "filename": item.get("filename"),
@@ -224,7 +318,10 @@ def _compact_retrieval_context(retrieval: dict[str, Any]) -> dict[str, Any]:
                 "name": item.get("name"),
                 "category": item.get("category"),
                 "source": item.get("source"),
-                "reason": str(item.get("description") or item.get("reason") or "")[:140],
+                "reason": str(item.get("description") or item.get("reason") or "")[:160],
+                "source_reference_id": item.get("source_reference_id"),
+                "visual_verified": item.get("visual_verified"),
+                "evidence_type": item.get("evidence_type"),
             }
             for item in retrieval.get("auto_factors", [])[:8]
         ],
@@ -232,6 +329,28 @@ def _compact_retrieval_context(retrieval: dict[str, Any]) -> dict[str, Any]:
             {"name": item.get("name"), "strategy": str(item.get("strategy", ""))[:160]}
             for item in retrieval.get("auto_templates", [])[:3]
         ],
+    }
+
+
+def _compact_reference_for_llm(reference: Any) -> dict[str, Any] | None:
+    if not isinstance(reference, dict):
+        return None
+    summary = reference.get("summary") if isinstance(reference.get("summary"), dict) else {}
+    return {
+        "id": reference.get("id"),
+        "title": reference.get("title"),
+        "category": reference.get("category"),
+        "source_url": reference.get("source_url"),
+        "source_mode": reference.get("source_mode"),
+        "source_capability": reference.get("source_capability"),
+        "visual_verified": reference.get("visual_verified"),
+        "hook_method": summary.get("hook_method"),
+        "selling_point_order": summary.get("selling_point_order", [])[:4],
+        "caption_style": summary.get("caption_style"),
+        "cta_pattern": summary.get("cta_pattern"),
+        "risk_notes": summary.get("risk_notes", [])[:3],
+        "metrics": summary.get("metrics"),
+        "storyboard_structure": reference.get("storyboard_structure", [])[:6],
     }
 
 
@@ -263,7 +382,7 @@ def _compact_strategy_for_llm(strategy: dict[str, Any]) -> dict[str, Any]:
                 "name": item.get("name"),
                 "category": item.get("category"),
                 "source": item.get("source"),
-                "reason": str(item.get("reason") or "")[:160],
+                "reason": str(item.get("reason") or "")[:90],
             }
             for item in (strategy.get("factor_selection_reason") or [])[:8]
         ],
@@ -274,7 +393,7 @@ def _compact_strategy_for_llm(strategy: dict[str, Any]) -> dict[str, Any]:
                 "factor_key": factor.get("factor_key"),
                 "name": factor.get("name"),
                 "category": factor.get("category"),
-                "reason": str(factor.get("reason", ""))[:160],
+                "reason": str(factor.get("reason", ""))[:90],
                 "linked_shot_ids": factor.get("linked_shot_ids", []),
             }
             for factor in (strategy.get("factor_board") or strategy.get("selected_factors") or [])[:8]
@@ -329,6 +448,8 @@ def _combine_substep_execution_modes(substeps: list[dict[str, Any]]) -> str:
     modes = [str(step.get("execution_mode") or "mock_missing_config") for step in substeps]
     if "real_failed" in modes:
         return "real_failed"
+    if any("fallback" in mode for mode in modes):
+        return "real_with_local_fallback"
     if "mock_missing_config" in modes:
         return "mock_missing_config"
     return "real"
@@ -481,6 +602,28 @@ def _to_int(value: Any, fallback: int) -> int:
         return int(match.group(0)) if match else fallback
 
 
+def _factor_confidence(value: Any, fallback: int = 76) -> int:
+    confidence = _to_int(value, fallback)
+    if confidence <= 0 or confidence > 100:
+        return fallback
+    return confidence
+
+
+def _factor_shot_ids(value: Any, index: int) -> list[str]:
+    raw_values = value if isinstance(value, list) else [value]
+    normalized_shot_ids: list[str] = []
+    for raw in raw_values:
+        matches = re.findall(r"shot[-_\s]*(\d+)|\b([1-9])\b", str(raw or "").lower())
+        for explicit, bare in matches:
+            shot_index = min(_to_int(explicit or bare, EDITING_SHOT_COUNT), EDITING_SHOT_COUNT)
+            shot_id = f"shot-{max(1, shot_index)}"
+            if shot_id not in normalized_shot_ids:
+                normalized_shot_ids.append(shot_id)
+    if not normalized_shot_ids:
+        normalized_shot_ids = [f"shot-{min(index, EDITING_SHOT_COUNT)}"]
+    return normalized_shot_ids
+
+
 def _coerce_str_list(value: Any, fallback: list[str], *, limit: int = 6) -> list[str]:
     if isinstance(value, list):
         cleaned = [str(item).strip() for item in value if str(item).strip()]
@@ -550,6 +693,8 @@ class MockLLMProvider:
             return self._storyboard_plan(payload)
         if task == "prompt_package":
             return self._prompt_package(payload)
+        if task == "segment_rewrite":
+            return self._segment_rewrite(payload)
         return self._script_storyboard(payload)
 
     def _viral_strategy(self, request: dict[str, Any]) -> dict[str, Any]:
@@ -574,10 +719,9 @@ class MockLLMProvider:
             "factor_coverage": factor_coverage,
             "factor_board": factor_board,
             "content_rhythm": [
-                "0-3s interrupt with the strongest problem",
-                "3-7s prove two concrete benefits with close shots",
-                "7-10s show daily-use payoff",
-                "10-12s close with offer and low-friction CTA",
+                "0-4s interrupt with the strongest problem",
+                "4-8s combine proof with the real-use payoff",
+                "8-12s close with offer and low-friction CTA",
             ],
             "selected_factors": factor_board,
             "risk_notes": [
@@ -621,24 +765,29 @@ class MockLLMProvider:
         material_note = request.get("material_notes") or request.get("reference_style")
         if script_attempt > 1:
             material_note = _claim_safe(material_note)
+        proof_point = points[1] if len(points) > 1 else points[0]
+        use_point = points[2] if len(points) > 2 else points[-1]
         scenes = [
             {
                 "beat": "Hook",
                 "point": points[0],
                 "voiceover": strategy["hook"],
                 "camera": "snap zoom from problem scene into product close-up",
+                "bgm": "cold open hit",
             },
             {
-                "beat": "Proof",
-                "point": points[1] if len(points) > 1 else points[0],
-                "voiceover": f"Here is the part you can actually see: {points[1] if len(points) > 1 else points[0]}.",
-                "camera": "macro pan across the feature while hands interact with it",
+                "beat": "Proof + Use",
+                "point": f"{proof_point}; {use_point}",
+                "voiceover": f"Here is the proof: {proof_point}. Then use it for {use_point}.",
+                "camera": "macro proof shot into one quick real-use cutaway",
+                "bgm": "proof pulse",
             },
             {
-                "beat": "Payoff CTA",
-                "point": points[2] if len(points) > 2 else points[-1],
-                "voiceover": f"Use it in the moment that matters, then tap through while {request.get('price_offer') or 'the offer'} is available.",
+                "beat": "CTA",
+                "point": request.get("price_offer") or points[-1],
+                "voiceover": f"Tap through while {request.get('price_offer') or 'the offer'} is available.",
                 "camera": "daily-use scene into locked product hero shot with subtle push-in",
+                "bgm": "warm CTA lift",
             },
         ]
         storyboard = []
@@ -663,7 +812,7 @@ class MockLLMProvider:
                     "voiceover": scene["voiceover"],
                     "subtitle": subtitle,
                     "tts_line": scene["voiceover"],
-                    "bgm_cue": ["cold open hit", "proof pulse", "warm CTA lift"][index - 1],
+                    "bgm_cue": scene["bgm"],
                     "linked_factor_keys": [factor["factor_key"] for factor in linked_factors],
                     "image_prompt": (
                         f"Product image mock for {product}, {visual_style}, "
@@ -715,6 +864,27 @@ class MockLLMProvider:
             ],
         }
 
+    def _segment_rewrite(self, payload: dict[str, Any]) -> dict[str, Any]:
+        request = payload.get("request", {})
+        shot = dict(payload.get("shot") or {})
+        product = _short(request.get("product_name", ""), "the product")
+        beat = _short(str(shot.get("beat") or ""), "Proof")
+        selling_points = _clean_points(request.get("selling_points"))
+        proof_point = selling_points[min(max(_to_int(shot.get("order_index"), 1) - 1, 0), len(selling_points) - 1)]
+        voiceover = f"Here is the sharper {beat.lower()} moment: {proof_point}."
+        subtitle = voiceover[:90]
+        visual_style = _short(request.get("visual_style", ""), "clean product close-ups")
+        return {
+            "beat": beat,
+            "visual_description": f"{visual_style}; refreshed {beat.lower()} segment for {product}, centered on {proof_point}.",
+            "camera_motion": str(shot.get("camera_motion") or "steady close-up with a clean push-in"),
+            "voiceover": voiceover,
+            "subtitle": subtitle,
+            "tts_line": voiceover,
+            "image_prompt": f"Refreshed product still for {product}, {beat} beat, show {proof_point}, {visual_style}.",
+            "video_prompt": f"Regenerate only this {beat} segment for {product}; show {proof_point}, keep continuity with the timeline, vertical commerce pacing.",
+        }
+
 
 class VolcengineLLMProvider:
     provider = "volcengine_ark_chat"
@@ -725,6 +895,7 @@ class VolcengineLLMProvider:
         self.last_model = _public_model_label(self.model, "volcengine")
         self.last_fallback: str | None = None
         self.last_repair_used = False
+        self.last_raw_excerpt: str | None = None
         self.last_execution_mode = "mock_missing_config"
         self.last_provider_status = "missing_config"
         self.last_provider_message = "Image text plan provider has not run yet."
@@ -746,6 +917,7 @@ class VolcengineLLMProvider:
         self.last_model = _public_model_label(self.model, "volcengine")
         self.last_fallback = None
         self.last_repair_used = False
+        self.last_raw_excerpt = None
         self.last_execution_mode = "real"
         self.last_provider_status = "configured"
         self.last_provider_message = "Volcengine text provider returned structured output."
@@ -769,9 +941,10 @@ class VolcengineLLMProvider:
         self.last_provider = self.provider
         self.last_model = _public_model_label(self.model, "volcengine")
         reason = _safe_error(exc)
+        raw_excerpt = f" Raw response excerpt: {self.last_raw_excerpt}" if self.last_raw_excerpt else ""
         self.last_execution_mode = "real_failed"
         self.last_provider_status = "error"
-        self.last_provider_message = f"Volcengine text provider failed; no placeholder output was generated. Reason: {reason}"
+        self.last_provider_message = f"Volcengine text provider failed; no placeholder output was generated. Reason: {reason}{raw_excerpt}"
         self.last_fallback = self.last_provider_message
         raise ProviderExecutionError(self.last_provider_message) from exc
 
@@ -791,8 +964,8 @@ class VolcengineLLMProvider:
                 },
                 {"role": "user", "content": self._prompt(task, payload)},
             ],
-            "temperature": 0.55,
-            "max_tokens": 1700 if task == "viral_strategy" else 2400,
+            "temperature": _text_task_temperature(task),
+            "max_tokens": _text_task_max_tokens(task),
             "response_format": {"type": "json_object"},
             "thinking": {"type": "disabled"},
         }
@@ -819,6 +992,7 @@ class VolcengineLLMProvider:
             raise last_error
         data = response.json()
         content = data["choices"][0]["message"]["content"]
+        self.last_raw_excerpt = _response_excerpt(content)
         try:
             return _extract_json_object(content)
         except Exception as exc:
@@ -849,7 +1023,7 @@ class VolcengineLLMProvider:
                 },
             ],
             "temperature": 0,
-            "max_tokens": 2400,
+            "max_tokens": _text_task_max_tokens(task),
             "response_format": {"type": "json_object"},
             "thinking": {"type": "disabled"},
         }
@@ -864,6 +1038,7 @@ class VolcengineLLMProvider:
                 response = client.post(url, headers=headers, json=retry_body)
             _raise_for_status(response, "Volcengine JSON repair")
         content = response.json()["choices"][0]["message"]["content"]
+        self.last_raw_excerpt = _response_excerpt(content)
         return _extract_json_object(content)
 
     def _prompt(self, task: str, payload: dict[str, Any]) -> str:
@@ -871,9 +1046,14 @@ class VolcengineLLMProvider:
             compact = _compact_request_for_llm(payload)
             if task == "strategy_brief":
                 return (
-                    "Create a concise commerce strategy brief. Return valid minified JSON only. "
-                    "Keys: product_angle, hook, audience_pain, source_asset_summary, selling_point_order, "
-                    "content_rhythm, risk_notes. Arrays must be arrays. Keep strings under 180 characters.\n\n"
+                    "Return exactly one minified JSON object with exactly these keys and no extra keys: "
+                    "product_angle, hook, audience_pain, source_asset_summary, selling_point_order, content_rhythm, risk_notes. "
+                    "Hard limits: every string <= 90 characters; arrays <= 3 items; no newlines inside strings; "
+                    "no markdown; no claims not present in the request. "
+                    "Use this exact shape: {\"product_angle\":\"\",\"hook\":\"\",\"audience_pain\":\"\","
+                    "\"source_asset_summary\":\"\",\"selling_point_order\":[\"\"],"
+                    "\"content_rhythm\":[\"0-4s hook\",\"4-8s proof + use\",\"8-12s CTA\"],"
+                    "\"risk_notes\":[\"\"]}.\n\n"
                     f"REQUEST JSON:\n{json.dumps(compact, ensure_ascii=False)}"
                 )
             return (
@@ -899,10 +1079,18 @@ class VolcengineLLMProvider:
                 },
             }
             return (
-                "Package exactly 8 viral commerce factors. Return valid minified JSON only. "
-                "Keys: factor_board, selected_factors, factor_coverage. factor_board must include one item "
-                "for each category: hook, proof, scene, trust, visual, audio, cta, risk. Each item needs "
-                "factor_key, name, category, reason, expected_effect, confidence, linked_shot_ids, source.\n\n"
+                "Return exactly one minified JSON object. No markdown. No extra keys. "
+                "Object keys: factor_board, selected_factors, factor_coverage. "
+                "factor_board must contain exactly 8 objects, in this exact category order: "
+                "hook, proof, scene, trust, visual, audio, cta, risk. "
+                "Each factor object keys exactly: factor_key, name, category, reason, expected_effect, confidence, linked_shot_ids, source. "
+                "Hard limits: name <= 36 chars, reason <= 70 chars, expected_effect <= 70 chars, "
+                "confidence integer 60-95, linked_shot_ids only shot-1/shot-2/shot-3. "
+                "selected_factors must be an empty array because the backend derives it from factor_board. factor_coverage must be 1. "
+                "Use this shape: {\"factor_board\":[{\"factor_key\":\"hook-1\",\"name\":\"\","
+                "\"category\":\"hook\",\"reason\":\"\",\"expected_effect\":\"\",\"confidence\":80,"
+                "\"linked_shot_ids\":[\"shot-1\"],\"source\":\"volcengine\"}],"
+                "\"selected_factors\":[],\"factor_coverage\":1}.\n\n"
                 f"PAYLOAD JSON:\n{json.dumps(compact_payload, ensure_ascii=False)}"
             )
         if task == "copy_draft":
@@ -911,9 +1099,14 @@ class VolcengineLLMProvider:
                 "strategy": _compact_strategy_for_llm(payload.get("strategy", {})),
             }
             return (
-                "Write the short-video copy only. Return valid minified JSON only. "
-                "Keys: title, narrative, voiceover_lines, subtitle_lines, tts_lines, bgm_plan, "
-                "duration_seconds, visual_style, source_asset_summary. Use 3 voiceover/subtitle/TTS lines.\n\n"
+                "Return exactly one minified JSON object. No markdown. No extra keys. "
+                "Keys exactly: title,narrative,voiceover_lines,subtitle_lines,tts_lines,bgm_plan,duration_seconds,visual_style,source_asset_summary. "
+                "Hard limits: title <= 60 chars, narrative <= 120 chars, visual_style <= 100 chars, source_asset_summary <= 90 chars, bgm_plan <= 90 chars. "
+                "voiceover_lines, subtitle_lines, and tts_lines must each contain exactly 3 strings for Hook, Proof + Use, CTA. "
+                "Each voiceover/TTS line <= 90 chars. Each subtitle <= 70 chars. duration_seconds must equal request duration. "
+                "Use this shape exactly: {\"title\":\"\",\"narrative\":\"\",\"voiceover_lines\":[\"\",\"\",\"\"],"
+                "\"subtitle_lines\":[\"\",\"\",\"\"],\"tts_lines\":[\"\",\"\",\"\"],\"bgm_plan\":\"\","
+                "\"duration_seconds\":12,\"visual_style\":\"\",\"source_asset_summary\":\"\"}.\n\n"
                 f"PAYLOAD JSON:\n{json.dumps(compact_payload, ensure_ascii=False)}"
             )
         if task == "storyboard_plan":
@@ -928,35 +1121,67 @@ class VolcengineLLMProvider:
                 },
             }
             return (
-                "Turn the copy into a 3-shot storyboard for clip-level editing. Return valid minified JSON only. "
-                "Key: storyboard. Each shot needs shot_id, order_index, duration_seconds, beat, "
-                "visual_description, camera_motion, voiceover, subtitle, linked_factor_keys. "
-                "The three shot durations must sum to the request duration exactly, usually 4 seconds each. "
-                "Do not include image_prompt or video_prompt in this step.\n\n"
+                "Return exactly one minified JSON object. No markdown. No extra keys. "
+                "Key exactly: storyboard. storyboard must contain exactly 3 objects. "
+                "Shot identities are fixed: shot-1/order 1/beat Hook, shot-2/order 2/beat Proof + Use, shot-3/order 3/beat CTA. "
+                "Each object keys exactly: shot_id,order_index,duration_seconds,beat,visual_description,camera_motion,voiceover,subtitle,linked_factor_keys. "
+                "Each duration_seconds must be 4 for a 12s request. visual_description <= 120 chars, camera_motion <= 60 chars, voiceover <= 90 chars, subtitle <= 70 chars. "
+                "linked_factor_keys <= 3 strings. Do not include image_prompt, video_prompt, tts_line, or bgm_cue in this step. "
+                "Use this shape: {\"storyboard\":[{\"shot_id\":\"shot-1\",\"order_index\":1,\"duration_seconds\":4,"
+                "\"beat\":\"Hook\",\"visual_description\":\"\",\"camera_motion\":\"\",\"voiceover\":\"\","
+                "\"subtitle\":\"\",\"linked_factor_keys\":[\"\"]}]}.\n\n"
                 f"PAYLOAD JSON:\n{json.dumps(compact_payload, ensure_ascii=False)}"
             )
-        if task == "prompt_package":
+        if task == "segment_rewrite":
             compact_payload = {
                 "request": _compact_request_for_llm(payload.get("request", {})),
                 "script": {
                     "title": payload.get("script", {}).get("title"),
-                    "visual_style": payload.get("script", {}).get("visual_style"),
+                    "duration_seconds": payload.get("script", {}).get("duration_seconds"),
                 },
-                "storyboard": [
+                "shot": {
+                    "shot_id": payload.get("shot", {}).get("shot_id"),
+                    "order_index": payload.get("shot", {}).get("order_index"),
+                    "duration_seconds": payload.get("shot", {}).get("duration_seconds"),
+                    "beat": payload.get("shot", {}).get("beat"),
+                    "visual_description": str(payload.get("shot", {}).get("visual_description", ""))[:260],
+                    "camera_motion": payload.get("shot", {}).get("camera_motion"),
+                    "voiceover": str(payload.get("shot", {}).get("voiceover", ""))[:220],
+                    "subtitle": str(payload.get("shot", {}).get("subtitle", ""))[:140],
+                    "video_prompt": str(payload.get("shot", {}).get("video_prompt", ""))[:320],
+                },
+                "neighbor_context": payload.get("neighbor_context", {}),
+            }
+            return (
+                "Rewrite only the target timeline segment. Return valid minified JSON only. "
+                "Keys: beat, visual_description, camera_motion, voiceover, subtitle, tts_line, image_prompt, video_prompt. "
+                "Do not rewrite other segments. Keep continuity with neighbor_context and keep strings concise.\n\n"
+                f"PAYLOAD JSON:\n{json.dumps(compact_payload, ensure_ascii=False)}"
+            )
+        if task == "prompt_package":
+            request = payload.get("request", {})
+            compact_payload = {
+                "product_name": request.get("product_name"),
+                "category": request.get("category"),
+                "visual_style": payload.get("script", {}).get("visual_style") or request.get("visual_style"),
+                "shots": [
                     {
                         "shot_id": shot.get("shot_id"),
                         "beat": shot.get("beat"),
-                        "visual_description": str(shot.get("visual_description", ""))[:180],
-                        "voiceover": str(shot.get("voiceover", ""))[:160],
-                        "subtitle": str(shot.get("subtitle", ""))[:100],
+                        "visual": str(shot.get("visual_description", ""))[:110],
+                        "voiceover": str(shot.get("voiceover", ""))[:80],
                     }
                     for shot in payload.get("storyboard", [])[:EDITING_SHOT_COUNT]
                 ],
             }
             return (
-                "Package prompts for the existing storyboard. Return valid minified JSON only. "
-                "Key: storyboard_prompts. Each item needs shot_id, image_prompt, video_prompt, tts_line, "
-                "bgm_cue, subtitle. Keep prompts specific but under 260 characters.\n\n"
+                "Return exactly one minified JSON object. No markdown. No extra keys. "
+                "Key exactly: storyboard_prompts. storyboard_prompts must contain exactly 3 objects for shot-1, shot-2, shot-3. "
+                "Each object keys exactly: shot_id,image_prompt,video_prompt,bgm_cue. "
+                "Write compact prompt fragments, not prose. No more than 12 words per image_prompt, 16 words per video_prompt, 8 words per bgm_cue. "
+                "Do not include tts_line or subtitle. Do not add script or storyboard keys. "
+                "Use this shape: {\"storyboard_prompts\":[{\"shot_id\":\"shot-1\","
+                "\"image_prompt\":\"\",\"video_prompt\":\"\",\"bgm_cue\":\"\"}]}.\n\n"
                 f"PAYLOAD JSON:\n{json.dumps(compact_payload, ensure_ascii=False)}"
             )
         compact_payload = {
@@ -964,15 +1189,17 @@ class VolcengineLLMProvider:
             "strategy": _compact_strategy_for_llm(payload.get("strategy", {})),
         }
         return (
-            "Create a compact 3-shot commerce script and storyboard for clip-level editing. Return minified valid JSON only. "
+            "Create a compact fixed 3-segment commerce script and storyboard for clip-level editing. Return minified valid JSON only. "
             "No markdown, no comments, no trailing commas, no newline characters inside string values. "
             "Keep each string under 150 characters. Required shape: {\"script\":{\"title\":\"\","
             "\"narrative\":\"\",\"voiceover_lines\":[\"\"],\"subtitle_lines\":[\"\"],\"tts_lines\":[\"\"],"
             "\"bgm_plan\":\"\",\"duration_seconds\":12,\"visual_style\":\"\",\"source_asset_summary\":\"\"},"
             "\"storyboard\":[{\"shot_id\":\"shot-1\",\"order_index\":1,\"duration_seconds\":4,"
-            "\"beat\":\"\",\"visual_description\":\"\",\"camera_motion\":\"\",\"voiceover\":\"\","
+            "\"beat\":\"Hook\",\"visual_description\":\"\",\"camera_motion\":\"\",\"voiceover\":\"\","
             "\"subtitle\":\"\",\"tts_line\":\"\",\"bgm_cue\":\"\",\"linked_factor_keys\":[\"\"],"
-            "\"image_prompt\":\"\",\"video_prompt\":\"\"}]}. storyboard must contain exactly 3 shots.\n\n"
+            "\"image_prompt\":\"\",\"video_prompt\":\"\"}]}. storyboard must contain exactly 3 segments. "
+            "Beat labels are fixed: shot-1 Hook, shot-2 Proof + Use, shot-3 CTA. "
+            "Do not use beat for audio rhythm descriptions.\n\n"
             f"PAYLOAD JSON:\n{json.dumps(compact_payload, ensure_ascii=False)}"
         )
 
@@ -980,6 +1207,10 @@ class VolcengineLLMProvider:
         baseline = self.fallback_provider.generate_structured(task, payload)
         if task == "strategy_brief":
             normalized = {**baseline, **{key: value for key, value in data.items() if value not in (None, "", [])}}
+            for key in ("product_angle", "hook", "audience_pain", "source_asset_summary"):
+                if not _valid_short_sentence(data.get(key)):
+                    raise ValueError(f"Volcengine strategy_brief returned invalid {key}.")
+                normalized[key] = re.sub(r"\s+", " ", str(data.get(key))).strip()
             normalized["selling_point_order"] = _coerce_str_list(
                 normalized.get("selling_point_order"),
                 baseline.get("selling_point_order", []),
@@ -990,9 +1221,7 @@ class VolcengineLLMProvider:
             return normalized
         if task == "factor_board_packaging":
             factors = data.get("factor_board") if isinstance(data.get("factor_board"), list) else baseline["factor_board"]
-            if len(factors) < 4:
-                factors = baseline["factor_board"]
-            factor_board = [_normalize_factor(factor, index) for index, factor in enumerate(factors[:8], start=1)]
+            factor_board = _complete_factor_board(factors, baseline["factor_board"])
             return {
                 "factor_board": factor_board,
                 "selected_factors": factor_board,
@@ -1003,6 +1232,18 @@ class VolcengineLLMProvider:
             normalized["voiceover_lines"] = _coerce_str_list(normalized.get("voiceover_lines"), baseline.get("voiceover_lines", []), limit=EDITING_SHOT_COUNT)
             normalized["subtitle_lines"] = _coerce_str_list(normalized.get("subtitle_lines"), baseline.get("subtitle_lines", []), limit=EDITING_SHOT_COUNT)
             normalized["tts_lines"] = _coerce_str_list(normalized.get("tts_lines"), baseline.get("tts_lines", []), limit=EDITING_SHOT_COUNT)
+            normalized["voiceover_lines"] = [_limit_text(line, 90) for line in normalized["voiceover_lines"]]
+            normalized["subtitle_lines"] = [_limit_text(line, 70) for line in normalized["subtitle_lines"]]
+            normalized["tts_lines"] = [_limit_text(line, 90) for line in normalized["tts_lines"]]
+            normalized["title"] = _limit_text(normalized.get("title"), 60, baseline.get("title", ""))
+            normalized["narrative"] = _limit_text(normalized.get("narrative"), 120, baseline.get("narrative", ""))
+            normalized["bgm_plan"] = _limit_text(normalized.get("bgm_plan"), 90, baseline.get("bgm_plan", ""))
+            normalized["visual_style"] = _limit_text(normalized.get("visual_style"), 100, baseline.get("visual_style", ""))
+            normalized["source_asset_summary"] = _limit_text(
+                normalized.get("source_asset_summary"),
+                90,
+                baseline.get("source_asset_summary", ""),
+            )
             normalized["duration_seconds"] = _to_int(normalized.get("duration_seconds"), _to_int(baseline.get("duration_seconds"), 12))
             return normalized
         if task == "storyboard_plan":
@@ -1025,14 +1266,21 @@ class VolcengineLLMProvider:
                 normalized_prompts.append(
                     {
                         "shot_id": str(item.get("shot_id") or fallback["shot_id"]),
-                        "image_prompt": str(item.get("image_prompt") or fallback["image_prompt"]),
-                        "video_prompt": str(item.get("video_prompt") or fallback["video_prompt"]),
-                        "tts_line": str(item.get("tts_line") or fallback["tts_line"]),
-                        "bgm_cue": str(item.get("bgm_cue") or fallback["bgm_cue"]),
-                        "subtitle": str(item.get("subtitle") or fallback["subtitle"]),
+                        "image_prompt": _limit_text(item.get("image_prompt"), 150, fallback["image_prompt"]),
+                        "video_prompt": _limit_text(item.get("video_prompt"), 180, fallback["video_prompt"]),
+                        "tts_line": _limit_text(item.get("tts_line"), 90, fallback["tts_line"]),
+                        "bgm_cue": _limit_text(item.get("bgm_cue"), 70, fallback["bgm_cue"]),
+                        "subtitle": _limit_text(item.get("subtitle"), 70, fallback["subtitle"]),
                     }
                 )
             return {"storyboard_prompts": normalized_prompts if len(normalized_prompts) == EDITING_SHOT_COUNT else baseline_prompts}
+        if task == "segment_rewrite":
+            normalized = {**baseline}
+            for key in ("beat", "visual_description", "camera_motion", "voiceover", "subtitle", "tts_line", "image_prompt", "video_prompt"):
+                value = data.get(key)
+                if value not in (None, "", []):
+                    normalized[key] = str(value)
+            return normalized
         if task == "viral_strategy":
             normalized = {**baseline, **{key: value for key, value in data.items() if value not in (None, "", [])}}
             normalized["selling_point_order"] = _coerce_str_list(
@@ -1047,9 +1295,9 @@ class VolcengineLLMProvider:
             )
             normalized["risk_notes"] = _coerce_str_list(normalized.get("risk_notes"), baseline.get("risk_notes", []), limit=4)
             factors = normalized.get("factor_board")
-            if not isinstance(factors, list) or len(factors) < 4:
+            if not isinstance(factors, list):
                 factors = baseline["factor_board"]
-            normalized["factor_board"] = [_normalize_factor(factor, index) for index, factor in enumerate(factors, start=1)]
+            normalized["factor_board"] = _complete_factor_board(factors, baseline["factor_board"])
             normalized["selected_factors"] = normalized["factor_board"]
             normalized["factor_coverage"] = round(len({factor["category"] for factor in normalized["factor_board"]}) / 8, 2)
             return normalized
@@ -1071,25 +1319,31 @@ class VolcengineLLMProvider:
 
 def _normalize_factor(factor: dict[str, Any], index: int) -> dict[str, Any]:
     category = str(factor.get("category") or "proof").lower()
-    shot_ids = factor.get("linked_shot_ids")
-    if not isinstance(shot_ids, list):
-        shot_ids = [f"shot-{min(index, EDITING_SHOT_COUNT)}"]
-    normalized_shot_ids = []
-    for item in shot_ids:
-        shot_index = min(_to_int(item, EDITING_SHOT_COUNT), EDITING_SHOT_COUNT)
-        shot_id = f"shot-{max(1, shot_index)}"
-        if shot_id not in normalized_shot_ids:
-            normalized_shot_ids.append(shot_id)
+    if category not in FACTOR_CATEGORIES:
+        category = "proof"
     return {
         "factor_key": str(factor.get("factor_key") or f"{category}-{index}"),
-        "name": str(factor.get("name") or f"{category.title()} factor"),
+        "name": _limit_text(factor.get("name"), 48, f"{category.title()} factor"),
         "category": category,
-        "reason": str(factor.get("reason") or "Selected by the real provider from the product request."),
-        "expected_effect": str(factor.get("expected_effect") or "Improve hook clarity and buyer confidence."),
-        "confidence": _to_int(factor.get("confidence"), 76),
-        "linked_shot_ids": normalized_shot_ids,
-        "source": str(factor.get("source") or "volcengine"),
+        "reason": _limit_text(factor.get("reason"), 90, "Selected by the real provider from the product request."),
+        "expected_effect": _limit_text(factor.get("expected_effect"), 90, "Improve hook clarity and buyer confidence."),
+        "confidence": _factor_confidence(factor.get("confidence"), 76),
+        "linked_shot_ids": _factor_shot_ids(factor.get("linked_shot_ids"), index),
+        "source": _limit_text(factor.get("source"), 60, "volcengine"),
     }
+
+
+def _complete_factor_board(factors: list[Any], baseline_factors: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    selected: dict[str, dict[str, Any]] = {}
+    for index, factor in enumerate(factors, start=1):
+        if not isinstance(factor, dict):
+            continue
+        normalized = _normalize_factor(factor, index)
+        selected.setdefault(normalized["category"], normalized)
+    for index, factor in enumerate(baseline_factors, start=1):
+        normalized = _normalize_factor(factor, index)
+        selected.setdefault(normalized["category"], normalized)
+    return [selected[category] for category in FACTOR_CATEGORIES if category in selected][:8]
 
 
 def _strategy_retrieval_fields(request: dict[str, Any]) -> dict[str, Any]:
@@ -1216,7 +1470,7 @@ def _shot_for_usable_for(values: list[Any]) -> str:
     if "proof" in text or "close" in text:
         return "shot-2"
     if "cta" in text:
-        return "shot-4"
+        return "shot-3"
     return "shot-3"
 
 
@@ -1224,7 +1478,17 @@ def _normalize_shot(shot: dict[str, Any], fallback: dict[str, Any], order_index:
     normalized = {**fallback, **{key: value for key, value in shot.items() if value not in (None, "")}}
     normalized["shot_id"] = str(normalized.get("shot_id") or f"shot-{order_index}")
     normalized["order_index"] = order_index
+    normalized["beat"] = SEGMENT_BEATS[min(max(order_index - 1, 0), len(SEGMENT_BEATS) - 1)]
     normalized["duration_seconds"] = _to_int(normalized.get("duration_seconds"), _to_int(fallback.get("duration_seconds"), 3))
+    normalized["visual_description"] = _limit_text(normalized.get("visual_description"), 120, fallback.get("visual_description", ""))
+    normalized["camera_motion"] = _limit_text(normalized.get("camera_motion"), 60, fallback.get("camera_motion", ""))
+    normalized["voiceover"] = _limit_text(normalized.get("voiceover"), 90, fallback.get("voiceover", ""))
+    normalized["subtitle"] = _limit_text(normalized.get("subtitle"), 70, fallback.get("subtitle", ""))
+    normalized["linked_factor_keys"] = [
+        _limit_text(item, 60)
+        for item in (normalized.get("linked_factor_keys") if isinstance(normalized.get("linked_factor_keys"), list) else [])
+        if str(item or "").strip()
+    ][:3]
     return normalized
 
 
@@ -2009,8 +2273,19 @@ class SeedanceVideoProvider:
             "Content-Type": "application/json",
         }
         with httpx.Client(timeout=settings.provider_request_timeout_seconds) as client:
-            create_response = client.post(create_url, headers=headers, json=body)
-            _raise_for_status(create_response, "Seedance create task")
+            last_create_error: Exception | None = None
+            for attempt in range(1, 4):
+                try:
+                    create_response = client.post(create_url, headers=headers, json=body)
+                    _raise_for_status(create_response, "Seedance create task")
+                    break
+                except Exception as exc:
+                    last_create_error = exc
+                    if attempt == 3 or not _is_retryable_seedance_error(exc):
+                        raise
+                    time.sleep(_provider_retry_delay_seconds(exc, attempt))
+            if last_create_error is not None and "create_response" not in locals():
+                raise last_create_error
             create_data = create_response.json()
             task_id = create_data.get("id") or create_data.get("task_id")
             if not task_id:
@@ -2018,9 +2293,18 @@ class SeedanceVideoProvider:
             query_url = _join_api_url(base_url, f"/contents/generations/tasks/{task_id}")
             deadline = time.monotonic() + max(0, settings.seedance_poll_seconds)
             last_data = create_data
+            query_error_count = 0
             while time.monotonic() <= deadline:
-                query_response = client.get(query_url, headers=headers)
-                _raise_for_status(query_response, "Seedance query task")
+                try:
+                    query_response = client.get(query_url, headers=headers)
+                    _raise_for_status(query_response, "Seedance query task")
+                    query_error_count = 0
+                except Exception as exc:
+                    query_error_count += 1
+                    if query_error_count >= 3 or not _is_retryable_seedance_error(exc):
+                        raise
+                    time.sleep(_provider_retry_delay_seconds(exc, query_error_count))
+                    continue
                 last_data = query_response.json()
                 status = str(last_data.get("status") or "").lower()
                 if status in {"succeeded", "failed", "cancelled", "canceled"}:
@@ -2204,7 +2488,7 @@ def _draft_style_bible(request: dict[str, Any], script: dict[str, Any]) -> dict[
             "Keep the same product identity, color, material, and proportions across the whole video.",
             "Keep one coherent lighting setup and visual language across all beats.",
             "Do not swap to a different product, package, person, logo, or unrelated scene between shots.",
-            "Use smooth short-video transitions so the 12-second video feels like one continuous draft.",
+            "Use smooth short-video transitions so the full requested timeline feels like one continuous draft.",
         ],
     }
 
@@ -2225,13 +2509,15 @@ def _draft_video_prompt(storyboard: list[dict[str, Any]], script: dict[str, Any]
                 f"Subtitle-safe caption: {shot.get('subtitle')}."
             )
         )
+    total_duration = cursor or _to_int(script.get("duration_seconds") or request.get("duration_seconds"), 12)
+    segment_count = len(beats) or EDITING_SHOT_COUNT
     return (
-        f"Create one continuous 12-second vertical 9:16 TikTok Shop product video for {style['product_name']}.\n"
+        f"Create one continuous {total_duration}-second vertical 9:16 TikTok Shop product video for {style['product_name']}.\n"
         f"Product category: {style['category']}. Platform: {style['platform']}.\n"
         f"Unified visual style: {style['visual_style']}. Reference style: {style['reference_style']}.\n"
         f"Script title: {style['script_title']}.\n"
-        "Continuity constraints: keep the same hero product, finish, proportions, lighting, and product world across all three beats. "
-        "Do not introduce unrelated products, people, packaging, logos, or locations. Make the video feel like one coherent draft with three editable 4-second segments.\n"
+        f"Continuity constraints: keep the same hero product, finish, proportions, lighting, and product world across all {segment_count} timeline beats. "
+        f"Do not introduce unrelated products, people, packaging, logos, or locations. Make the video feel like one coherent draft with {segment_count} editable segments.\n"
         "Timeline beats:\n"
         + "\n".join(beats)
     )
@@ -2249,19 +2535,54 @@ def _replacement_clip_prompt(
     index = next((idx for idx, item in enumerate(sorted_storyboard) if item.get("shot_id") == shot.get("shot_id")), 0)
     previous_shot = sorted_storyboard[index - 1] if index > 0 else None
     next_shot = sorted_storyboard[index + 1] if index + 1 < len(sorted_storyboard) else None
+    cursor = 0
+    target_start = 0
+    target_end = _to_int(shot.get("duration_seconds"), SHOT_CLIP_DURATION_SECONDS)
+    for item in sorted_storyboard:
+        duration = _to_int(item.get("duration_seconds"), SHOT_CLIP_DURATION_SECONDS)
+        start = cursor
+        cursor += duration
+        if item.get("shot_id") == shot.get("shot_id"):
+            target_start = start
+            target_end = cursor
+            break
     draft_payload = (draft_artifact or {}).get("payload", {}) if isinstance(draft_artifact, dict) else {}
+    retrieval = request.get("retrieval_context") or {}
+    selected_reference = retrieval.get("selected_reference_video") or request.get("reference_video") or {}
+    reference_title = selected_reference.get("title") if isinstance(selected_reference, dict) else ""
+    reference_mode = selected_reference.get("source_mode") if isinstance(selected_reference, dict) else ""
+    factor_names = [
+        str(item.get("name") or item.get("factor_key") or "")
+        for item in (retrieval.get("auto_factors") or request.get("selected_library_factors") or [])[:4]
+        if isinstance(item, dict)
+    ]
+    asset_anchors = [
+        f"{asset.get('filename') or asset.get('title') or 'asset'}: {str(asset.get('description') or asset.get('summary') or '')[:160]}"
+        for asset in (request.get("source_assets") or request.get("asset_library") or request.get("selected_asset_slices") or [])[:4]
+        if isinstance(asset, dict)
+    ]
+    source_asset_warning = (
+        "No uploaded visual source asset is available; maintain consistency from the original draft and text style bible only."
+        if not request.get("source_assets") and not (request.get("selected_asset_slices") or request.get("asset_slice_ids"))
+        else "Use the attached product assets or selected slices as visual anchors."
+    )
     return (
         f"Regenerate only one {shot.get('duration_seconds') or SHOT_CLIP_DURATION_SECONDS}-second replacement segment for {style['product_name']}.\n"
-        f"Keep strict continuity with the existing 12-second AI draft. Same product identity, same color/material/proportions, same lighting, same camera language.\n"
+        f"This replacement will be inserted into the original {target_start}-{target_end}s timeline slot. The original draft audio/timing may remain underneath it, so match the pacing and visual rhythm of that slot.\n"
+        f"Keep strict continuity with the existing AI draft timeline: same hero product, same color/material/proportions, same lighting, same background world, same camera language, and same ad quality.\n"
         f"Global style: {style['visual_style']}. Reference style: {style['reference_style']}.\n"
+        f"Best viral reference: {reference_title or 'none'} ({reference_mode or 'auto'}). Factor anchors: {', '.join(factor_names) or 'use the current strategy board'}.\n"
+        f"Asset continuity note: {source_asset_warning}\n"
+        f"Visual asset anchors: {' | '.join(asset_anchors) if asset_anchors else 'none'}.\n"
         f"Draft task context: {draft_payload.get('task_id') or 'draft task not available'}.\n"
-        f"Previous beat context: {(previous_shot or {}).get('beat') or 'none'} / {(previous_shot or {}).get('subtitle') or ''}\n"
+        f"Previous beat context: {(previous_shot or {}).get('beat') or 'none'} / {(previous_shot or {}).get('visual_description') or ''} / {(previous_shot or {}).get('subtitle') or ''}\n"
         f"Target beat: {shot.get('beat')} / {shot.get('visual_description')}\n"
         f"Target voiceover: {shot.get('voiceover')}\n"
         f"Target subtitle-safe caption: {shot.get('subtitle')}\n"
         f"Camera: {shot.get('camera_motion')}. Updated video prompt: {shot.get('video_prompt')}\n"
-        f"Next beat context: {(next_shot or {}).get('beat') or 'none'} / {(next_shot or {}).get('subtitle') or ''}\n"
-        "Do not change the hero product or visual universe. This clip must drop into the original timeline as a replacement segment."
+        f"Next beat context: {(next_shot or {}).get('beat') or 'none'} / {(next_shot or {}).get('visual_description') or ''} / {(next_shot or {}).get('subtitle') or ''}\n"
+        "Do not make a standalone new ad. Do not change the hero product, packaging, model, logo, room, palette, or visual universe. "
+        "The first frame must plausibly follow the previous beat, and the last frame must plausibly lead into the next beat."
     )
 
 
@@ -2366,6 +2687,8 @@ def viral_strategy_agent(state: GenerationGraphState) -> GenerationGraphState:
                 "selected_slices": len(retrieval_context.get("selected_slices") or []),
                 "auto_factors": len(retrieval_context.get("auto_factors") or []),
                 "auto_templates": len(retrieval_context.get("auto_templates") or []),
+                "auto_references": len(retrieval_context.get("auto_references") or []),
+                "reference_match_mode": retrieval_context.get("reference_match_mode"),
             },
             execution_mode="real",
             provider_status="configured",
@@ -2414,9 +2737,9 @@ def viral_strategy_agent(state: GenerationGraphState) -> GenerationGraphState:
             _provider_failed_substep(
                 "factor_board_packaging",
                 sub_started,
-                {"hook": brief.get("hook"), "category_count": 8},
-                llm_provider,
-                exc,
+                input_summary={"hook": brief.get("hook"), "category_count": 8},
+                provider=llm_provider,
+                exc=exc,
             )
         )
         failed = _failed_agent_state(
@@ -2497,7 +2820,11 @@ def script_storyboard_agent(state: GenerationGraphState) -> GenerationGraphState
             "copy_draft",
             sub_started,
             {"hook": state["strategy"].get("hook"), "duration_seconds": payload["request"].get("duration_seconds")},
-            {"title": script.get("title"), "line_count": len(script.get("voiceover_lines", []))},
+            {
+                "title": script.get("title"),
+                "line_count": len(script.get("voiceover_lines", [])),
+                "duration_seconds": script.get("duration_seconds"),
+            },
             llm_provider,
         )
     )
@@ -2534,7 +2861,11 @@ def script_storyboard_agent(state: GenerationGraphState) -> GenerationGraphState
             "storyboard_plan",
             sub_started,
             {"script_title": script.get("title"), "line_count": len(script.get("voiceover_lines", []))},
-            {"shot_count": len(storyboard), "duration_seconds": sum(_to_int(shot.get("duration_seconds"), 0) for shot in storyboard)},
+            {
+                "shot_count": len(storyboard),
+                "duration_seconds": sum(_to_int(shot.get("duration_seconds"), 0) for shot in storyboard),
+                "beats": [shot.get("beat") for shot in storyboard],
+            },
             llm_provider,
         )
     )
@@ -2593,12 +2924,12 @@ def script_storyboard_agent(state: GenerationGraphState) -> GenerationGraphState
         started_at=started_at,
         fallback=_fallback_trace(
             llm_provider,
-            "Volcengine Ark generates script, subtitles, TTS lines, BGM plan, storyboard, and prompts.",
+            "Volcengine Ark generates copy, fixed storyboard, and prompts as three small structured calls.",
         ),
         execution_mode=_combine_substep_execution_modes(substeps),
         provider_status=_combine_substep_provider_statuses(substeps),
         provider_message="; ".join(str(step.get("provider_message")) for step in substeps if step.get("provider_message")),
-        status=_status_trace(llm_provider),
+        status="failed" if any(str(step.get("status")) == "failed" for step in substeps) else "succeeded",
     )
     return {
         **state,
@@ -2813,11 +3144,11 @@ def render_review_agent(state: GenerationGraphState) -> GenerationGraphState:
                 {
                     "shot_id": shot["shot_id"],
                     "duration_seconds": shot["duration_seconds"],
-                    "source": "asset slice replacement is reserved for the future editing provider",
+                    "source": "fixed segment assembly is handled by the local Timeline Editor",
                 }
                 for shot in storyboard
             ],
-            "disabled_capabilities": ["drag timeline", "replace source slice", "render real mp4"],
+            "disabled_capabilities": ["freeform trim handles", "multi-track smart edit decisions", "real TTS rendering"],
             "is_real_output": False,
             "mock_reason": "Shot-level smart editing provider is not connected yet.",
         },

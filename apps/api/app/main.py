@@ -23,12 +23,16 @@ from app.schemas import (
     AssemblyPreviewCreate,
     CreativeTemplateBuildCreate,
     CreativeTemplateRead,
+    EditorTimelineUpdate,
     ExperimentAnalysisRead,
     ExperimentAnalyzeCreate,
+    FastMossVideoImportCreate,
+    FastMossVideoImportRead,
     GenerationRunCreate,
     GenerationRunRead,
     HealthRead,
     StoryboardPatch,
+    StoryboardCreate,
     ViralFactorRead,
     ViralVideoAnalysisRead,
     ViralVideoAnalyzeCreate,
@@ -47,13 +51,19 @@ from app.services.asset_library import (
     update_asset_slice,
     update_collection,
 )
+from app.services.preset_seed import seed_preset_workspace
 from app.services.experiments import create_experiment_analysis, get_experiment, list_experiments
-from app.services.ffmpeg_assembly import AssemblyError, assembled_video_path, execute_assembly_preview_task, queue_assembly_preview
+from app.services.ffmpeg_assembly import AssemblyError, assembled_video_path, editor_clip_video_path, execute_assembly_preview_task, queue_assembly_preview
+from app.services.fastmoss_import import attach_source_video_to_reference, import_fastmoss_videos
 from app.services.generation_runs import (
+    add_storyboard_shot,
     create_generation_run,
+    delete_storyboard_shot,
+    duplicate_storyboard_shot,
     execute_generation_run_task,
     get_generation_export,
     get_generation_run,
+    get_editor_timeline,
     list_generation_runs,
     patch_storyboard_shot,
     queue_regenerate_shot_clip,
@@ -61,8 +71,17 @@ from app.services.generation_runs import (
     render_preview,
     retry_generation_run,
     execute_regenerate_shot_clip_task,
+    split_storyboard_shot,
+    update_editor_timeline,
 )
-from app.services.viral_library import analyze_reference_video, build_creative_template, list_templates, list_viral_factors, list_viral_videos
+from app.services.viral_library import (
+    analyze_reference_video,
+    build_creative_template,
+    list_templates,
+    list_viral_factors,
+    list_viral_videos,
+    viral_reference_cover_path,
+)
 
 
 settings = get_settings()
@@ -88,6 +107,7 @@ def health() -> dict[str, Any]:
     text_configured = bool(settings.volcengine_api_key and (settings.volcengine_endpoint_id or settings.volcengine_text_model))
     image_configured = bool(settings.volcengine_api_key and settings.volcengine_image_model)
     video_configured = bool(settings.seedance_api_key and (settings.seedance_endpoint_id or settings.seedance_model))
+    fastmoss_configured = bool(settings.fastmoss_api_key or (settings.fastmoss_client_id and settings.fastmoss_client_secret))
     return {
         "status": "ok",
         "graph": "langgraph-generation-and-experiment-graphs",
@@ -98,9 +118,15 @@ def health() -> dict[str, Any]:
             "image_plan_provider": "configured" if text_configured else "missing_config",
             "image_generation_provider": "configured" if image_configured else "missing_config",
             "video_provider": "configured" if video_configured else "missing_config",
+            "fastmoss_provider": "configured" if fastmoss_configured else "missing_config",
             "experiment_provider": "configured" if text_configured else "missing_config",
         },
     }
+
+
+@app.post("/preset-assets/seed")
+def seed_preset_assets(db: Session = Depends(get_db)):
+    return seed_preset_workspace(db)
 
 
 @app.post("/asset-collections", response_model=AssetCollectionRead)
@@ -133,6 +159,7 @@ def patch_asset_collection(collection_id: UUID, payload: AssetCollectionUpdate, 
 async def add_collection_assets(collection_id: UUID, request: Request, db: Session = Depends(get_db)):
     try:
         payloads = await _parse_collection_asset_request(collection_id, request)
+        _validate_user_video_decomposition_payloads(payloads)
         return [
             add_asset_to_collection(collection_id, payload, db, content=content)
             for payload, content in payloads
@@ -144,6 +171,7 @@ async def add_collection_assets(collection_id: UUID, request: Request, db: Sessi
 @app.post("/assets", response_model=AssetRead)
 async def create_asset_endpoint(request: Request, db: Session = Depends(get_db)):
     payload, content = await _parse_asset_request(request)
+    _validate_user_video_decomposition_payloads([(payload, content)])
     return create_asset(payload, db, content=content)
 
 
@@ -235,6 +263,39 @@ def analyze_viral_video(payload: ViralVideoAnalyzeCreate, db: Session = Depends(
     return analyze_reference_video(payload, db)
 
 
+@app.post("/viral-videos/import-fastmoss", response_model=FastMossVideoImportRead)
+def import_fastmoss_viral_videos(payload: FastMossVideoImportCreate, db: Session = Depends(get_db)):
+    return import_fastmoss_videos(payload, db)
+
+
+@app.post("/viral-videos/{reference_id}/attach-source-video", response_model=ViralVideoAnalysisRead)
+async def attach_viral_source_video(reference_id: UUID, request: Request, db: Session = Depends(get_db)):
+    try:
+        filename, content_type, content = await _parse_single_file_request(request)
+        return attach_source_video_to_reference(
+            reference_id,
+            filename=filename,
+            content_type=content_type,
+            content=content,
+            db=db,
+        )
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Viral reference not found") from None
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/viral-videos/{reference_id}/cover")
+def read_viral_video_cover(reference_id: UUID, db: Session = Depends(get_db)):
+    try:
+        path = viral_reference_cover_path(reference_id, db)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Viral reference not found") from None
+    if path is None:
+        raise HTTPException(status_code=404, detail="Viral reference cover not found")
+    return FileResponse(path, media_type="image/jpeg", filename=f"viral-reference-{reference_id}.jpg")
+
+
 @app.get("/viral-factors", response_model=list[ViralFactorRead])
 def list_viral_factors_endpoint(
     q: str = Query(default=""),
@@ -293,6 +354,26 @@ def export_run(run_id: UUID, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Generation run not found") from None
 
 
+@app.get("/generation-runs/{run_id}/editor-timeline")
+def read_editor_timeline(run_id: UUID, db: Session = Depends(get_db)):
+    try:
+        return get_editor_timeline(run_id, db)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Generation run not found") from None
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.patch("/generation-runs/{run_id}/editor-timeline", response_model=GenerationRunRead)
+def patch_editor_timeline(run_id: UUID, payload: EditorTimelineUpdate, db: Session = Depends(get_db)):
+    try:
+        return update_editor_timeline(run_id, payload.model_dump(mode="json"), db)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Generation run not found") from None
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.post("/generation-runs/{run_id}/retry", response_model=GenerationRunRead)
 def retry_run(run_id: UUID, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     try:
@@ -309,6 +390,48 @@ def patch_shot(run_id: UUID, shot_id: str, payload: StoryboardPatch, db: Session
         return patch_storyboard_shot(run_id, shot_id, payload.model_dump(mode="json", exclude_unset=True), db)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from None
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/generation-runs/{run_id}/storyboard", response_model=GenerationRunRead)
+def add_shot(run_id: UUID, payload: StoryboardCreate, db: Session = Depends(get_db)):
+    try:
+        return add_storyboard_shot(run_id, payload.model_dump(mode="json", exclude_unset=True), db)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from None
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.delete("/generation-runs/{run_id}/storyboard/{shot_id}", response_model=GenerationRunRead)
+def delete_shot(run_id: UUID, shot_id: str, db: Session = Depends(get_db)):
+    try:
+        return delete_storyboard_shot(run_id, shot_id, db)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from None
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/generation-runs/{run_id}/storyboard/{shot_id}/duplicate", response_model=GenerationRunRead)
+def duplicate_shot(run_id: UUID, shot_id: str, db: Session = Depends(get_db)):
+    try:
+        return duplicate_storyboard_shot(run_id, shot_id, db)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from None
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/generation-runs/{run_id}/storyboard/{shot_id}/split", response_model=GenerationRunRead)
+def split_shot(run_id: UUID, shot_id: str, db: Session = Depends(get_db)):
+    try:
+        return split_storyboard_shot(run_id, shot_id, db)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from None
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/generation-runs/{run_id}/storyboard/{shot_id}/regenerate", response_model=GenerationRunRead)
@@ -365,6 +488,24 @@ def read_assembled_video(run_id: UUID, aspect_ratio: str = Query(default=""), db
     return FileResponse(path, media_type="video/mp4", filename=f"viralcutai-{run_id}-{suffix}.mp4")
 
 
+@app.get("/generation-runs/{run_id}/editor-clip-video")
+def read_editor_clip_video(
+    run_id: UUID,
+    clip_id: str = Query(default=""),
+    shot_id: str = Query(default=""),
+    source_type: str = Query(default="draft_segment"),
+    db: Session = Depends(get_db),
+):
+    try:
+        path = editor_clip_video_path(run_id, db, clip_id=clip_id, shot_id=shot_id, source_type=source_type)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Generation run not found") from None
+    except AssemblyError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    suffix = clip_id or shot_id or "clip"
+    return FileResponse(path, media_type="video/mp4", filename=f"viralcutai-{run_id}-{suffix}.mp4")
+
+
 @app.post("/experiments/analyze", response_model=ExperimentAnalysisRead)
 def analyze_experiment(payload: ExperimentAnalyzeCreate, db: Session = Depends(get_db)):
     try:
@@ -404,7 +545,7 @@ async def _parse_generation_request(request: Request) -> tuple[GenerationRunCrea
                 "price_offer": str(form.get("price_offer") or ""),
                 "material_notes": str(form.get("material_notes") or ""),
                 "creative_goal": str(form.get("creative_goal") or "Generate a conversion-oriented commerce video"),
-                "reference_style": str(form.get("reference_style") or "fast native short-video product demo"),
+                "reference_style": str(form.get("reference_style") or "fast native short-video beauty product reveal"),
                 "visual_style": str(form.get("visual_style") or "clean studio, bright product close-ups"),
                 "duration_seconds": int(str(form.get("duration_seconds") or "12")),
                 "platform": str(form.get("platform") or "TikTok Shop"),
@@ -462,6 +603,22 @@ async def _parse_asset_request(request: Request) -> tuple[AssetCreate, bytes | N
     return AssetCreate.model_validate(await request.json()), None
 
 
+async def _parse_single_file_request(request: Request) -> tuple[str, str, bytes]:
+    content_type = request.headers.get("content-type", "")
+    if not content_type.startswith("multipart/form-data"):
+        raise ValueError("Expected multipart/form-data with a file field.")
+    form = await request.form()
+    file = form.get("file") or form.get("source_video") or form.get("video")
+    if not hasattr(file, "filename") or not hasattr(file, "read"):
+        raise ValueError("Missing uploaded video file.")
+    content = await file.read()
+    filename = str(getattr(file, "filename", "") or "source-video.mp4")
+    content_type_value = str(getattr(file, "content_type", "") or "application/octet-stream")
+    if content_type_value == "application/octet-stream" and filename.lower().endswith(".mp4"):
+        content_type_value = "video/mp4"
+    return filename, content_type_value, content
+
+
 async def _parse_collection_asset_request(collection_id: UUID, request: Request) -> list[tuple[AssetCreate, bytes | None]]:
     content_type = request.headers.get("content-type", "")
     if content_type.startswith("multipart/form-data"):
@@ -509,6 +666,16 @@ async def _parse_collection_asset_request(collection_id: UUID, request: Request)
     payload_data = await request.json()
     payload_data["collection_id"] = str(collection_id)
     return [(AssetCreate.model_validate(payload_data), None)]
+
+
+def _validate_user_video_decomposition_payloads(payloads: list[tuple[AssetCreate, bytes | None]]) -> None:
+    for payload, content in payloads:
+        if payload.asset_kind != "user_video_decomposition":
+            continue
+        if content is None:
+            raise HTTPException(status_code=400, detail="User video decomposition requires an uploaded video file.")
+        if not payload.content_type.startswith("video/"):
+            raise HTTPException(status_code=400, detail="User video decomposition only accepts video files.")
 
 
 def _parse_points(value: str) -> list[str]:

@@ -442,10 +442,13 @@ def _analyze_reference_asset(asset: Asset) -> dict[str, Any]:
 def _write_analysis_children(asset: Asset, profile: dict[str, Any], db: Session) -> None:
     tags = _profile_tags(profile)
     for index, tag in enumerate(tags, start=1):
+        tag_name = str(tag).strip()[:120]
+        if not tag_name:
+            continue
         db.add(
             AssetTag(
                 asset_id=asset.id,
-                name=tag,
+                name=tag_name,
                 tag_type="product_signal" if index <= 5 else "keyword",
                 confidence=max(62, 96 - index * 3),
                 source="provider" if profile.get("provider_status") == "configured" else "system",

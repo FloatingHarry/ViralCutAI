@@ -139,6 +139,9 @@ export type StoryboardShot = {
   image_prompt: string;
   video_prompt: string;
   selected_asset_slice_id?: string | null;
+  dirty?: boolean;
+  replacement_status?: "none" | "queued" | "processing" | "ready" | "failed" | "not_connected" | string;
+  source_mode?: "draft_video" | "replacement_clip" | "asset_slice" | string;
 };
 
 export type TimelineClip = {
@@ -169,6 +172,36 @@ export type TimelineSegment = TimelineClip & {
   draft_video_url?: string | null;
   replacement_video_url?: string | null;
   draft_prompt?: string | null;
+  selected_asset_slice_id?: string | null;
+  dirty?: boolean;
+  replacement_status?: string | null;
+};
+
+export type EditorTimelineClip = {
+  clip_id: string;
+  order_index?: number;
+  source_type: "draft_segment" | "replacement_clip" | "asset_slice";
+  shot_id?: string | null;
+  asset_slice_id?: string | null;
+  label: string;
+  subtitle: string;
+  voiceover: string;
+  source_start_seconds: number;
+  source_end_seconds: number;
+  duration_seconds: number;
+  timeline_start_seconds?: number;
+  timeline_end_seconds?: number;
+  enabled?: boolean;
+  source_label?: string | null;
+  source_url?: string | null;
+  status?: string | null;
+};
+
+export type EditorTimeline = {
+  version: number;
+  mode: "editor_timeline_v1" | string;
+  total_duration_seconds: number;
+  clips: EditorTimelineClip[];
 };
 
 export type ViralFactorBoardItem = {
@@ -180,6 +213,14 @@ export type ViralFactorBoardItem = {
   confidence: number;
   linked_shot_ids: string[];
   source: string;
+  source_mode?: string;
+  source_capability?: string;
+  reference_visual_verified?: boolean;
+  visual_verified?: boolean;
+  audio_verified?: boolean;
+  verified_asset_id?: string | null;
+  evidence_type?: string;
+  evidence_text?: string;
 };
 
 export type GenerationRun = {
@@ -255,11 +296,14 @@ export type GenerationRun = {
     assembled_resolution?: string | null;
     assembled_aspect_ratio?: string | null;
     assembled_has_audio?: boolean | null;
+    assembled_audio_source?: "draft_audio" | "uploaded_audio" | string | null;
     assembled_bgm_status?: string | null;
     assembled_tts_status?: string | null;
     assembled_exports?: Record<string, string>;
+    assembled_stale?: boolean | null;
     assembly_status?: string | null;
     assembly_failure_reason?: string | null;
+    assembly_stale_reason?: string | null;
     active_export_profile?: string | null;
     planned_duration_seconds?: number | null;
     requested_provider_duration_seconds?: number | null;
@@ -277,6 +321,8 @@ export type GenerationRun = {
     timeline_clips?: TimelineClip[];
     timeline_segments?: TimelineSegment[];
     active_segment_sources?: Record<string, string>;
+    editor_timeline?: EditorTimeline;
+    editor_timeline_stale?: boolean | null;
   };
   export_manifest: Record<string, unknown>;
   artifacts: MediaArtifact[];
@@ -423,8 +469,31 @@ export type ViralVideoAnalysis = {
       thumbnail_url?: string;
       source_statement?: string;
       notes?: string;
+      source_mode?: string;
+      source_capability?: string;
+      visual_verified?: boolean;
+      verified_at?: string;
+      verified_asset_id?: string | null;
+      verified_asset_filename?: string;
+      verified_asset_kind?: string;
+      verified_asset_provider_status?: string;
+      verified_asset_created_at?: string;
+      verified_asset_updated_at?: string;
+      fastmoss?: Record<string, unknown>;
     };
     factor_board?: ViralFactorBoardItem[];
+    source_mode?: string;
+    source_capability?: string;
+    visual_verified?: boolean;
+    verified_at?: string;
+    verified_asset_id?: string | null;
+    verified_asset_filename?: string;
+    verified_asset_kind?: string;
+    verified_asset_created_at?: string;
+    verified_asset_updated_at?: string;
+    frame_count?: number;
+    video_metadata?: Record<string, unknown>;
+    verified_frame_evidence?: Array<Record<string, unknown>>;
     template_strategy?: string;
     hook_method?: string;
     selling_point_order?: string[];
@@ -437,6 +506,7 @@ export type ViralVideoAnalysis = {
     compliance_statement?: string;
   };
   created_at: string;
+  updated_at: string;
 };
 
 export type ViralFactor = {
@@ -465,6 +535,41 @@ export type CreativeTemplateBuildRequest = {
   category?: string;
   reference_ids: string[];
   notes?: string;
+};
+
+export type FastMossImportRequest = {
+  keywords: string;
+  region?: string;
+  product_category_id?: number | null;
+  creator_category_id?: number | null;
+  order_by?: string;
+  pagesize?: number;
+  page?: number;
+};
+
+export type FastMossImportItem = {
+  status: string;
+  video_id: string;
+  title: string;
+  source_url: string;
+  reference_id?: string | null;
+  factor_count: number;
+  message: string;
+  metrics: Record<string, unknown>;
+};
+
+export type FastMossImportResult = {
+  status: string;
+  summary: string;
+  provider_status: string;
+  provider_message: string;
+  request: Record<string, unknown>;
+  imported_count: number;
+  skipped_count: number;
+  failed_count: number;
+  factor_count: number;
+  items: FastMossImportItem[];
+  raw_total?: number | null;
 };
 
 export type ExperimentAnalysis = {
@@ -544,7 +649,10 @@ export async function getHealth() {
   return parseResponse<Health>(await fetch(`${API_BASE}/health`));
 }
 
-export async function createAsset(payload: { filename?: string; category: string; description: string }, file?: File | null) {
+export async function createAsset(
+  payload: { filename?: string; category: string; description: string; asset_kind?: string },
+  file?: File | null,
+) {
   if (file) {
     const formData = new FormData();
     formData.append("payload", JSON.stringify(payload));
@@ -607,7 +715,7 @@ export async function updateAssetCollection(
 
 export async function addAssetsToCollection(
   collectionId: string,
-  payload: { category: string; description?: string },
+  payload: { category: string; description?: string; asset_kind?: string },
   files: File[],
 ) {
   const formData = new FormData();
@@ -716,6 +824,27 @@ export async function analyzeViralVideo(payload: {
   );
 }
 
+export async function importFastMossVideos(payload: FastMossImportRequest) {
+  return parseResponse<FastMossImportResult>(
+    await fetch(`${API_BASE}/viral-videos/import-fastmoss`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }),
+  );
+}
+
+export async function attachViralSourceVideo(referenceId: string, file: File) {
+  const formData = new FormData();
+  formData.append("file", file);
+  return parseResponse<ViralVideoAnalysis>(
+    await fetch(`${API_BASE}/viral-videos/${referenceId}/attach-source-video`, {
+      method: "POST",
+      body: formData,
+    }),
+  );
+}
+
 export async function listViralVideos(options: { query?: string; category?: string; factor_category?: string } = {}) {
   const params = new URLSearchParams();
   if (options.query) {
@@ -808,6 +937,20 @@ export async function getGenerationRunExport(runId: string) {
   return parseResponse<Record<string, unknown>>(await fetch(`${API_BASE}/generation-runs/${runId}/export`));
 }
 
+export async function getEditorTimeline(runId: string) {
+  return parseResponse<EditorTimeline>(await fetch(`${API_BASE}/generation-runs/${runId}/editor-timeline`));
+}
+
+export async function updateEditorTimeline(runId: string, clips: EditorTimelineClip[]) {
+  return parseResponse<GenerationRun>(
+    await fetch(`${API_BASE}/generation-runs/${runId}/editor-timeline`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ clips }),
+    }),
+  );
+}
+
 export async function patchStoryboardShot(runId: string, shotId: string, payload: Partial<StoryboardShot>) {
   return parseResponse<GenerationRun>(
     await fetch(`${API_BASE}/generation-runs/${runId}/storyboard/${shotId}`, {
@@ -815,6 +958,34 @@ export async function patchStoryboardShot(runId: string, shotId: string, payload
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     }),
+  );
+}
+
+export async function addStoryboardShot(runId: string, payload: Partial<StoryboardShot> = {}) {
+  return parseResponse<GenerationRun>(
+    await fetch(`${API_BASE}/generation-runs/${runId}/storyboard`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }),
+  );
+}
+
+export async function deleteStoryboardShot(runId: string, shotId: string) {
+  return parseResponse<GenerationRun>(
+    await fetch(`${API_BASE}/generation-runs/${runId}/storyboard/${shotId}`, { method: "DELETE" }),
+  );
+}
+
+export async function duplicateStoryboardShot(runId: string, shotId: string) {
+  return parseResponse<GenerationRun>(
+    await fetch(`${API_BASE}/generation-runs/${runId}/storyboard/${shotId}/duplicate`, { method: "POST" }),
+  );
+}
+
+export async function splitStoryboardShot(runId: string, shotId: string) {
+  return parseResponse<GenerationRun>(
+    await fetch(`${API_BASE}/generation-runs/${runId}/storyboard/${shotId}/split`, { method: "POST" }),
   );
 }
 
@@ -851,6 +1022,21 @@ export function assembledVideoUrl(runId: string, aspectRatio?: string | null) {
   }
   const suffix = params.toString() ? `?${params.toString()}` : "";
   return `${API_BASE}/generation-runs/${runId}/assembled-video${suffix}`;
+}
+
+export function editorClipVideoUrl(runId: string, options: { clipId?: string; shotId?: string; sourceType?: string }) {
+  const params = new URLSearchParams();
+  if (options.clipId) {
+    params.set("clip_id", options.clipId);
+  }
+  if (options.shotId) {
+    params.set("shot_id", options.shotId);
+  }
+  if (options.sourceType) {
+    params.set("source_type", options.sourceType);
+  }
+  const suffix = params.toString() ? `?${params.toString()}` : "";
+  return `${API_BASE}/generation-runs/${runId}/editor-clip-video${suffix}`;
 }
 
 export async function retryGenerationRun(runId: string) {

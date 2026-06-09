@@ -8,7 +8,7 @@ Agent-based AIGC commerce video workspace for the AI full-stack challenge.
 - Backend: FastAPI, Python, SQLAlchemy 2.0
 - Agent runtime: LangGraph generation graph and experiment analysis graph
 - Data: PostgreSQL ORM tables for assets, viral factors, generation runs, artifacts, traces, and experiments
-- Providers: automatic Volcengine text/image and Seedance video calls, with local placeholders only for capabilities that are not connected
+- Providers: automatic Volcengine text/image, Seedance video, and FastMoss market-data calls, with local placeholders only for capabilities that are not connected
 
 ## Quick Start
 
@@ -29,7 +29,7 @@ Open:
 ## Product Flow
 
 1. Create a private Asset Collection in My Assets, then upload product images or videos. Images are analyzed through the Volcengine multimodal endpoint; videos are keyframe-sampled with FFmpeg and analyzed through the same endpoint.
-2. Analyze external reference URLs in Viral Library. The system stores source metadata, structured playbook analysis, factor boards, and creative templates without copying source media.
+2. Import public TikTok ecommerce signals from FastMoss as owner-curated viral candidates. The system stores structured market data first, then selected candidates can be manually upgraded with an attached MP4 for keyframe verification.
 3. Cluster two to five external references into n:1 creative templates when a reusable pattern appears.
 4. Open Studio, choose Viral Rewrite, Template Fusion, or Auto Mix, then select private assets plus external reference analysis, templates, and factors.
 5. The Generation Graph runs Viral Strategy Agent, Script & Storyboard Agent, and Render & Review Agent.
@@ -55,6 +55,8 @@ Open:
 - `PATCH /asset-slices/{id}`
 - `GET /viral-videos`
 - `POST /viral-videos/analyze`
+- `POST /viral-videos/import-fastmoss`
+- `POST /viral-videos/{id}/attach-source-video`
 - `GET /viral-factors`
 - `GET /creative-templates`
 - `POST /creative-templates/build`
@@ -114,7 +116,7 @@ erDiagram
 |---|---|
 | Product asset upload | Supported through private Asset Collections, batch image/video upload, and Studio temporary upload |
 | Asset slicing / tags / embedding retrieval | Volcengine multimodal image understanding, FFmpeg video keyframes, callable slices, tags, pseudo embeddings, and search |
-| Viral video analysis | Dynamic reference analysis through `/viral-videos/analyze` |
+| Viral video analysis | Internal FastMoss Video Search import through `/viral-videos/import-fastmoss`, plus manual MP4 verification through `/viral-videos/{id}/attach-source-video` |
 | Viral factors and templates | Global Viral Library is generated only from external reference analysis; Studio run factors stay on the run |
 | Script generation and storyboard | LangGraph Script & Storyboard Agent with internal copy/storyboard/prompt substeps |
 | One-click video generation | One Studio action creates provider-tracked preview artifacts, one real cover image when configured, and real Seedance video when configured |
@@ -162,6 +164,11 @@ SEEDANCE_BASE_URL=
 SEEDANCE_ENDPOINT_ID=
 SEEDANCE_MODEL=
 
+FASTMOSS_API_KEY=
+FASTMOSS_CLIENT_ID=
+FASTMOSS_CLIENT_SECRET=
+FASTMOSS_BASE_URL=https://openapi.fastmoss.com
+
 PROVIDER_REQUEST_TIMEOUT_SECONDS=120
 SEEDANCE_POLL_SECONDS=90
 SEEDANCE_POLL_INTERVAL_SECONDS=5
@@ -171,7 +178,9 @@ UPLOAD_DIR=storage/uploads
 
 Use `.env.example` as the public template and put real local secrets in `.env.local`. The local secret file is ignored by Git. Uploaded assets are stored under `storage/`, which is also gitignored.
 
-Provider roles are intentionally separated: `VOLCENGINE_ENDPOINT_ID` / `VOLCENGINE_TEXT_MODEL` power text generation and image prompt planning, `VOLCENGINE_IMAGE_MODEL` powers real cover image generation, and `SEEDANCE_ENDPOINT_ID` / `SEEDANCE_MODEL` powers video generation. If the image model is missing, the cover image is reported as not generated and the API does not call the image endpoint.
+Provider roles are intentionally separated: `VOLCENGINE_ENDPOINT_ID` / `VOLCENGINE_TEXT_MODEL` power text generation and image prompt planning, `VOLCENGINE_IMAGE_MODEL` powers real cover image generation, `SEEDANCE_ENDPOINT_ID` / `SEEDANCE_MODEL` powers video generation, and `FASTMOSS_API_KEY` or `FASTMOSS_CLIENT_ID` / `FASTMOSS_CLIENT_SECRET` power Viral Library market-data import. If the image model is missing, the cover image is reported as not generated and the API does not call the image endpoint.
+
+FastMoss import calls `POST /video/v1/search` with ecommerce-video filtering and then uses Volcengine to extract a structured-only 8-factor board. These records are marked `fastmoss_structured_only` and `visual_verified=false`. Selected references can be upgraded by manually attaching a source MP4; the backend stores the file under `storage/`, runs FFmpeg keyframe analysis, and regenerates factors with `owner_viral_verified` evidence. Source footage is not copied into generated videos.
 
 Seedance 1.5 currently works in the 4-12 second range in this app. Studio defaults to 12 seconds and the backend validates generation runs with a maximum duration of 12 seconds.
 

@@ -2,20 +2,22 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Activity, BarChart3, FileVideo, Images, LayoutDashboard, Library, Network, Sparkles } from "lucide-react";
+import { Activity, BarChart3, FileVideo, Images, LayoutDashboard, Library, Network, Scissors, Sparkles } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
+import { WorkflowStepper } from "@/components/workflow-stepper";
 import { API_BASE, getHealth } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 const navigation = [
   { href: "/", label: "Home", icon: LayoutDashboard },
-  { href: "/studio", label: "Studio", icon: Sparkles },
   { href: "/assets", label: "My Assets", icon: Images },
   { href: "/viral-library", label: "Viral Library", icon: Library },
-  { href: "/agent", label: "Trace", icon: Network },
+  { href: "/studio", label: "Studio", icon: Sparkles },
+  { href: "/editor", label: "Editor", icon: Scissors },
   { href: "/analytics", label: "Analytics", icon: BarChart3 },
+  { href: "/agent", label: "Trace", icon: Network },
 ];
 
 export function AppShell({ children }: { children: React.ReactNode }) {
@@ -115,6 +117,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </div>
           </div>
         </header>
+        <WorkflowStepper />
         <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">{children}</div>
       </div>
     </div>

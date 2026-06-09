@@ -23,6 +23,7 @@ The runtime uses automatic provider selection. If a provider has the required ke
 | Volcengine text | strategy, factor board, script, storyboard, image prompt planning, experiment analysis | real text output when `VOLCENGINE_ENDPOINT_ID` or `VOLCENGINE_TEXT_MODEL` is configured |
 | Volcengine image | one Studio cover / hero image through the image generation API | real cover image only when `VOLCENGINE_IMAGE_MODEL` is configured |
 | Seedance | video generation | real video task when configured, local video plan only when missing configuration |
+| FastMoss | Viral Library TikTok ecommerce video signals | real Video Search import when `FASTMOSS_API_KEY` or `FASTMOSS_CLIENT_ID` / `FASTMOSS_CLIENT_SECRET` are configured |
 | Analytics metrics | experiment attribution | user-entered real metrics only; no simulated A/B metrics |
 
 ## Environment Variables
@@ -43,6 +44,11 @@ SEEDANCE_API_KEY=
 SEEDANCE_BASE_URL=
 SEEDANCE_ENDPOINT_ID=
 SEEDANCE_MODEL=
+
+FASTMOSS_API_KEY=
+FASTMOSS_CLIENT_ID=
+FASTMOSS_CLIENT_SECRET=
+FASTMOSS_BASE_URL=https://openapi.fastmoss.com
 
 PROVIDER_REQUEST_TIMEOUT_SECONDS=120
 SEEDANCE_POLL_SECONDS=90
@@ -70,6 +76,10 @@ Generation agents stay as three external LangGraph nodes, but each node may reco
 For image generation, `VOLCENGINE_IMAGE_MODEL` is required. If it is not set, the cover image substep reports "not connected" and does not call the image generation API. `VOLCENGINE_ENDPOINT_ID` and `VOLCENGINE_TEXT_MODEL` stay reserved for text and image prompt planning.
 
 Seedance 1.5 is treated as a 4-12 second video provider. Studio defaults to 12 seconds, and `GenerationRunCreate.duration_seconds` validates the same 4-12 second range.
+
+FastMoss import is exposed as the internal backend endpoint `POST /viral-videos/import-fastmoss`. The backend supports direct API-key bearer auth through `FASTMOSS_API_KEY`, and also supports exchanging `client_id` / `client_secret` for an access token when those credentials are provided. It calls `POST /video/v1/search` with `filter.is_ecommerce = 1`, and stores only structured analysis, public video URL, cover URL, and metrics. These records are marked `fastmoss_structured_only` with `visual_verified=false`; they do not claim observed footage.
+
+Selected FastMoss references can be upgraded with `POST /viral-videos/{reference_id}/attach-source-video`. The owner manually downloads or obtains the MP4, uploads it as multipart `file`, and the backend stores it under `storage/` as an `owner_viral_reference` Asset. FFmpeg keyframes and Volcengine frame understanding are then combined with FastMoss metrics to regenerate factors marked `owner_viral_verified`. The source footage remains internal evidence only and is not copied into generated videos.
 
 Analytics requires real user-entered metrics for each selected succeeded run. `/experiments/analyze` rejects requests without views, watch completion, average watch seconds, CTR, CVR, orders, and revenue for every variant.
 

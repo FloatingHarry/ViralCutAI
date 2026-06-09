@@ -25,6 +25,10 @@ class Settings(BaseSettings):
     seedance_base_url: str | None = None
     seedance_endpoint_id: str | None = None
     seedance_model: str | None = None
+    fastmoss_api_key: str | None = None
+    fastmoss_client_id: str | None = None
+    fastmoss_client_secret: str | None = None
+    fastmoss_base_url: str = "https://openapi.fastmoss.com"
     provider_request_timeout_seconds: int = 120
     seedance_poll_seconds: int = 90
     seedance_poll_interval_seconds: int = 5

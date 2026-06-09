@@ -19,8 +19,21 @@ from app.services.asset_library import (
     asset_retrieval_for_generation,
     asset_slice_context_for_generation,
 )
-from app.services.agent_workflows import _public_provider_fields, _raise_for_status, stream_generation_graph, video_provider
+from app.services.agent_workflows import _public_provider_fields, _raise_for_status, llm_provider, stream_generation_graph, video_provider
 from app.services.viral_library import viral_context_for_generation, viral_retrieval_for_generation
+
+
+MAX_TIMELINE_SEGMENTS = 3
+MIN_TIMELINE_DURATION_SECONDS = 4
+MAX_TIMELINE_DURATION_SECONDS = 12
+DEFAULT_TIMELINE_DURATION_SECONDS = 12
+MAX_EDITOR_TIMELINE_SECONDS = 60
+
+
+def _fixed_timeline_error() -> ValueError:
+    return ValueError(
+        "Timeline V1 is fixed to 3 segments. Add, delete, duplicate, and split are disabled; edit or regenerate one existing segment instead."
+    )
 
 
 def create_generation_run(
@@ -51,15 +64,11 @@ def create_generation_run(
         "auto_references": [],
         "methodology_summary": "Automatic factor retrieval is disabled for this run.",
     }
-    selected_library_factors = [
-        *request_payload.get("selected_library_factors", []),
-        *viral_retrieval.get("auto_factors", []),
-    ]
-    request_payload["selected_library_factors"] = _dedupe_factors(selected_library_factors)
+    request_payload["selected_library_factors"] = _dedupe_factors(request_payload.get("selected_library_factors", []))
     request_payload["retrieval_context"] = {
         **asset_retrieval,
         **viral_retrieval,
-        "selected_reference_video": request_payload.get("reference_video"),
+        "selected_reference_video": request_payload.get("reference_video") or viral_retrieval.get("selected_reference_video"),
         "selected_template": request_payload.get("creative_template"),
         "selected_factor_count": len(payload.factor_ids),
     }
@@ -109,6 +118,7 @@ def create_generation_run(
             "asset_collection_id": str(payload.asset_collection_id) if payload.asset_collection_id else None,
             "auto_retrieved_asset_count": len(asset_retrieval.get("auto_asset_results", [])),
             "auto_retrieved_factor_count": len(viral_retrieval.get("auto_factors", [])),
+            "auto_retrieved_reference_count": len(viral_retrieval.get("auto_references", [])),
             "assets": request_payload["source_assets"],
             "retrieval_context": request_payload["retrieval_context"],
         },
@@ -413,7 +423,41 @@ def get_generation_run(run_id: UUID, db: Session) -> GenerationRun:
             )
             db.add(run)
             db.commit()
+    _sync_editor_timeline_sources(run)
     return run
+
+
+def get_editor_timeline(run_id: UUID, db: Session) -> dict[str, Any]:
+    run = get_generation_run(run_id, db)
+    timeline = _ensure_editor_timeline(run)
+    if (run.preview or {}).get("editor_timeline") != timeline:
+        run.preview = {**(run.preview or {}), "editor_timeline": timeline}
+        db.add(run)
+        db.commit()
+    return timeline
+
+
+def update_editor_timeline(run_id: UUID, payload: dict[str, Any], db: Session) -> GenerationRun:
+    run = get_generation_run(run_id, db)
+    timeline = _normalize_editor_timeline(payload.get("clips") or [], run)
+    run.preview = {
+        **(run.preview or {}),
+        "editor_timeline": timeline,
+        "editor_timeline_stale": True,
+    }
+    _mark_assembly_stale(run, "editor_timeline_patch")
+    _add_event(
+        db,
+        run.id,
+        len(run.events) + 1,
+        "editor_timeline_saved",
+        "completed",
+        f"Editor timeline saved with {len(timeline.get('clips') or [])} clips.",
+        {"clip_count": len(timeline.get("clips") or []), "duration_seconds": timeline.get("total_duration_seconds")},
+    )
+    db.add(run)
+    db.commit()
+    return get_generation_run(run.id, db)
 
 
 def get_generation_export(run_id: UUID, db: Session) -> dict[str, Any]:
@@ -437,9 +481,27 @@ def get_generation_export(run_id: UUID, db: Session) -> dict[str, Any]:
     }
 
 
+def add_storyboard_shot(run_id: UUID, payload: dict[str, Any], db: Session) -> GenerationRun:
+    raise _fixed_timeline_error()
+
+
+def delete_storyboard_shot(run_id: UUID, shot_id: str, db: Session) -> GenerationRun:
+    raise _fixed_timeline_error()
+
+
+def duplicate_storyboard_shot(run_id: UUID, shot_id: str, db: Session) -> GenerationRun:
+    raise _fixed_timeline_error()
+
+
+def split_storyboard_shot(run_id: UUID, shot_id: str, db: Session) -> GenerationRun:
+    raise _fixed_timeline_error()
+
+
 def patch_storyboard_shot(run_id: UUID, shot_id: str, updates: dict[str, Any], db: Session) -> GenerationRun:
+    if updates.get("order_index") is not None or updates.get("duration_seconds") is not None:
+        raise ValueError("Timeline V1 keeps 3 fixed 4-second segments; order and duration edits are disabled.")
     run = get_generation_run(run_id, db)
-    storyboard = [dict(shot) for shot in run.storyboard]
+    storyboard = _ordered_storyboard(run.storyboard)
     changed = False
     for shot in storyboard:
         if shot.get("shot_id") != shot_id:
@@ -447,20 +509,29 @@ def patch_storyboard_shot(run_id: UUID, shot_id: str, updates: dict[str, Any], d
         for key, value in updates.items():
             if key == "selected_asset_slice_id":
                 shot[key] = value
+                shot["source_mode"] = "asset_slice" if value else shot.get("source_mode") or "draft_video"
                 changed = True
             elif value is not None:
                 shot[key] = value
                 changed = True
+        shot["dirty"] = True
     if not changed:
         raise LookupError("Storyboard shot not found")
     if updates.get("order_index") is not None:
         storyboard = _reorder_storyboard(storyboard, shot_id, int(updates["order_index"]))
+    target_seconds = (
+        _legal_timeline_total(_storyboard_duration_total(storyboard))
+        if updates.get("duration_seconds") is not None
+        else _timeline_target_seconds(run)
+    )
     storyboard = _normalize_storyboard_duration_total(
         storyboard,
-        int(run.script.get("duration_seconds") or run.request_payload.get("duration_seconds") or 12),
+        target_seconds,
     )
     run.storyboard = storyboard
+    _sync_script_duration(run)
     run.preview = _build_preview_from_storyboard(run)
+    _mark_assembly_stale(run, "storyboard_patch")
     _sync_preview_timeline_segments(run)
     _add_event(
         db,
@@ -468,7 +539,7 @@ def patch_storyboard_shot(run_id: UUID, shot_id: str, updates: dict[str, Any], d
         len(run.events) + 1,
         "storyboard_edit_saved",
         "completed",
-        f"{shot_id} was edited. Full smart editing remains provider pending.",
+        f"{shot_id} was edited and marked dirty.",
         {"shot_id": shot_id, "updates": updates},
     )
     db.add(run)
@@ -478,8 +549,10 @@ def patch_storyboard_shot(run_id: UUID, shot_id: str, updates: dict[str, Any], d
 
 def queue_regenerate_shot_clip(run_id: UUID, shot_id: str, db: Session) -> GenerationRun:
     run = get_generation_run(run_id, db)
-    if not any(shot.get("shot_id") == shot_id for shot in run.storyboard):
+    storyboard = _set_shot_fields(run.storyboard, shot_id, {"replacement_status": "queued"})
+    if storyboard is None:
         raise LookupError("Storyboard shot not found")
+    run.storyboard = storyboard
     _add_event(
         db,
         run.id,
@@ -494,6 +567,7 @@ def queue_regenerate_shot_clip(run_id: UUID, shot_id: str, db: Session) -> Gener
         "video_task_status": "processing",
         "active_regeneration_shot_id": shot_id,
     }
+    _mark_assembly_stale(run, "replacement_queued")
     _sync_preview_timeline_segments(run)
     db.add(run)
     db.commit()
@@ -510,25 +584,37 @@ def execute_regenerate_shot_clip_task(run_id: UUID, shot_id: str) -> None:
         draft_artifact = _artifact_dict(_draft_video_artifact(run))
         artifact = video_provider.generate_replacement_clip(shot, run.storyboard, run.script, run.request_payload, draft_artifact)
         _upsert_seedance_replacement_clip_artifact(db, run, artifact)
-        _sync_preview_timeline_segments(run)
+        db.flush()
+        run = get_generation_run(run.id, db)
         status = str(artifact.get("status") or "")
         payload = artifact.get("payload", {})
         if status == "real_generated":
+            run.storyboard = _set_shot_fields(
+                run.storyboard,
+                shot_id,
+                {"replacement_status": "ready", "source_mode": "replacement_clip", "dirty": False},
+            ) or run.storyboard
+            _replace_editor_timeline_shot_with_replacement(run, shot_id)
             event_type = "replacement_clip_completed"
             event_status = "completed"
             message = f"{shot_id} replacement clip is ready."
         elif status == "real_task_pending":
+            run.storyboard = _set_shot_fields(run.storyboard, shot_id, {"replacement_status": "processing"}) or run.storyboard
             event_type = "replacement_clip_submitted"
             event_status = "running"
             message = f"{shot_id} replacement Seedance task was submitted."
         elif status == "provider_failed":
+            run.storyboard = _set_shot_fields(run.storyboard, shot_id, {"replacement_status": "failed"}) or run.storyboard
             event_type = "replacement_clip_failed"
             event_status = "failed"
             message = str(payload.get("failure_reason") or f"{shot_id} replacement clip failed.")
         else:
+            run.storyboard = _set_shot_fields(run.storyboard, shot_id, {"replacement_status": "processing" if status != "mock_missing_config" else "not_connected"}) or run.storyboard
             event_type = "replacement_clip_failed" if status == "provider_failed" else "replacement_clip_submitted"
             event_status = "completed" if status == "mock_missing_config" else "running"
             message = f"{shot_id} replacement clip recorded status {status}."
+        _mark_assembly_stale(run, "replacement_updated")
+        _sync_preview_timeline_segments(run)
         _add_event(
             db,
             run.id,
@@ -543,6 +629,7 @@ def execute_regenerate_shot_clip_task(run_id: UUID, shot_id: str) -> None:
     except Exception as exc:
         failed_run = db.get(GenerationRun, run_id)
         if failed_run is not None:
+            failed_run.storyboard = _set_shot_fields(failed_run.storyboard, shot_id, {"replacement_status": "failed"}) or failed_run.storyboard
             _add_event(
                 db,
                 failed_run.id,
@@ -560,12 +647,39 @@ def execute_regenerate_shot_clip_task(run_id: UUID, shot_id: str) -> None:
 
 def regenerate_storyboard_shot(run_id: UUID, shot_id: str, db: Session) -> GenerationRun:
     run = get_generation_run(run_id, db)
-    updates = {
-        "voiceover": f"Fresh provider-pending rewrite for {shot_id}: show one sharper proof moment before the offer.",
-        "subtitle": "Sharper proof, same offer.",
-        "image_prompt": f"Regenerated image prompt for {shot_id}, provider pending, use existing asset slices.",
-        "video_prompt": f"Regenerated video prompt for {shot_id}, provider pending, keep 9:16 commerce pacing.",
-    }
+    storyboard = _ordered_storyboard(run.storyboard)
+    shot_index = next((index for index, item in enumerate(storyboard) if item.get("shot_id") == shot_id), -1)
+    if shot_index < 0:
+        raise LookupError("Storyboard shot not found")
+    shot = storyboard[shot_index]
+    try:
+        updates = llm_provider.generate_structured(
+            "segment_rewrite",
+            {
+                "request": run.request_payload,
+                "script": run.script,
+                "storyboard": storyboard,
+                "shot": shot,
+                "neighbor_context": {
+                    "previous": storyboard[shot_index - 1] if shot_index > 0 else None,
+                    "next": storyboard[shot_index + 1] if shot_index + 1 < len(storyboard) else None,
+                },
+            },
+        )
+    except Exception as exc:
+        run.error_message = _limit_text(str(exc), 600)
+        _add_event(
+            db,
+            run.id,
+            len(run.events) + 1,
+            "storyboard_segment_rewrite_failed",
+            "failed",
+            f"{shot_id} copy regeneration failed: {_limit_text(str(exc), 300)}",
+            {"shot_id": shot_id, "error": _limit_text(str(exc), 600)},
+        )
+        db.add(run)
+        db.commit()
+        return get_generation_run(run.id, db)
     return patch_storyboard_shot(run_id, shot_id, updates, db)
 
 
@@ -646,6 +760,12 @@ def _sync_pending_video_artifacts(run: GenerationRun, db: Session) -> dict[str, 
                     {"task_id": payload.get("task_id"), "video_url": payload.get("video_url")},
                 )
             elif artifact.artifact_type == "seedance_replacement_clip" and previous_status != "real_generated":
+                run.storyboard = _set_shot_fields(
+                    run.storyboard,
+                    str(payload.get("shot_id") or ""),
+                    {"replacement_status": "ready", "source_mode": "replacement_clip", "dirty": False},
+                ) or run.storyboard
+                _replace_editor_timeline_shot_with_replacement(run, str(payload.get("shot_id") or ""))
                 _add_event(
                     db,
                     run.id,
@@ -684,6 +804,11 @@ def _sync_pending_video_artifacts(run: GenerationRun, db: Session) -> dict[str, 
                     {"task_id": payload.get("task_id"), "status": status},
                 )
             elif artifact.artifact_type == "seedance_replacement_clip" and previous_status != "provider_failed":
+                run.storyboard = _set_shot_fields(
+                    run.storyboard,
+                    str(payload.get("shot_id") or ""),
+                    {"replacement_status": "failed"},
+                ) or run.storyboard
                 _add_event(
                     db,
                     run.id,
@@ -719,6 +844,11 @@ def _sync_pending_video_artifacts(run: GenerationRun, db: Session) -> dict[str, 
                     {"task_id": payload.get("task_id"), "status": status},
                 )
             elif artifact.artifact_type == "seedance_replacement_clip" and previous_status != "real_task_pending":
+                run.storyboard = _set_shot_fields(
+                    run.storyboard,
+                    str(payload.get("shot_id") or ""),
+                    {"replacement_status": "processing"},
+                ) or run.storyboard
                 _add_event(
                     db,
                     run.id,
@@ -746,6 +876,197 @@ def _sync_pending_video_artifacts(run: GenerationRun, db: Session) -> dict[str, 
     return {"checked": checked, "updated": updated}
 
 
+def _ensure_editor_timeline(run: GenerationRun) -> dict[str, Any]:
+    preview = run.preview or {}
+    existing = preview.get("editor_timeline")
+    if isinstance(existing, dict) and isinstance(existing.get("clips"), list) and existing.get("clips"):
+        try:
+            return _normalize_editor_timeline(existing.get("clips") or [], run)
+        except ValueError:
+            pass
+    return _build_editor_timeline_from_storyboard(run)
+
+
+def _build_editor_timeline_from_storyboard(run: GenerationRun) -> dict[str, Any]:
+    _sync_preview_timeline_segments(run)
+    segments = (run.preview or {}).get("timeline_segments") or []
+    clips: list[dict[str, Any]] = []
+    for index, segment in enumerate(segments, start=1):
+        if not isinstance(segment, dict):
+            continue
+        source = str(segment.get("source") or "draft_video")
+        source_type = "replacement_clip" if source == "replacement_clip" else "asset_slice" if source == "asset_slice" else "draft_segment"
+        start = int(segment.get("start_seconds") or 0)
+        duration = max(1, int(segment.get("duration_seconds") or 4))
+        clip = {
+            "clip_id": f"clip-{segment.get('shot_id') or index}",
+            "order_index": index,
+            "source_type": source_type,
+            "shot_id": segment.get("shot_id"),
+            "asset_slice_id": segment.get("selected_asset_slice_id"),
+            "label": segment.get("beat") or f"Segment {index}",
+            "subtitle": segment.get("subtitle") or "",
+            "voiceover": segment.get("voiceover") or "",
+            "source_start_seconds": 0 if source_type == "replacement_clip" else start,
+            "source_end_seconds": duration if source_type == "replacement_clip" else start + duration,
+            "duration_seconds": duration,
+            "timeline_start_seconds": start,
+            "timeline_end_seconds": start + duration,
+            "enabled": True,
+            "source_label": segment.get("source_label") or "Draft slice",
+            "source_url": segment.get("replacement_video_url") if source_type == "replacement_clip" else segment.get("draft_video_url"),
+            "status": segment.get("artifact_status") or segment.get("task_status") or "waiting",
+        }
+        clips.append(clip)
+    return _normalize_editor_timeline(clips, run)
+
+
+def _normalize_editor_timeline(clips: list[Any], run: GenerationRun) -> dict[str, Any]:
+    normalized: list[dict[str, Any]] = []
+    cursor = 0
+    seen_ids: set[str] = set()
+    for index, raw in enumerate(clips, start=1):
+        if not isinstance(raw, dict):
+            continue
+        if raw.get("enabled") is False:
+            continue
+        source_type = str(raw.get("source_type") or "draft_segment")
+        if source_type not in {"draft_segment", "replacement_clip", "asset_slice"}:
+            raise ValueError("Editor clip source_type must be draft_segment, replacement_clip, or asset_slice.")
+        shot_id = str(raw.get("shot_id") or "").strip() or None
+        asset_slice_id = str(raw.get("asset_slice_id") or raw.get("selected_asset_slice_id") or "").strip() or None
+        if source_type in {"draft_segment", "replacement_clip"} and not shot_id:
+            raise ValueError("Draft and replacement editor clips require shot_id.")
+        if source_type == "asset_slice" and not asset_slice_id:
+            raise ValueError("Asset slice editor clips require asset_slice_id.")
+        source_start = max(0, int(raw.get("source_start_seconds") or 0))
+        raw_end = raw.get("source_end_seconds")
+        raw_duration = max(1, int(raw.get("duration_seconds") or 4))
+        source_end = max(source_start + 1, int(raw_end)) if raw_end is not None else source_start + raw_duration
+        duration = max(1, min(30, source_end - source_start if raw_end is not None else raw_duration))
+        if cursor + duration > MAX_EDITOR_TIMELINE_SECONDS:
+            raise ValueError(f"Editor timeline is limited to {MAX_EDITOR_TIMELINE_SECONDS} seconds in this version.")
+        clip_id = str(raw.get("clip_id") or f"clip-{index}").strip()[:80] or f"clip-{index}"
+        if clip_id in seen_ids:
+            clip_id = f"{clip_id}-{index}"
+        seen_ids.add(clip_id)
+        label = str(raw.get("label") or raw.get("beat") or shot_id or f"Clip {index}").strip()
+        normalized.append(
+            {
+                "clip_id": clip_id,
+                "order_index": len(normalized) + 1,
+                "source_type": source_type,
+                "shot_id": shot_id,
+                "asset_slice_id": asset_slice_id,
+                "label": label[:240],
+                "subtitle": str(raw.get("subtitle") or "")[:400],
+                "voiceover": str(raw.get("voiceover") or "")[:1200],
+                "source_start_seconds": source_start,
+                "source_end_seconds": source_start + duration,
+                "duration_seconds": duration,
+                "timeline_start_seconds": cursor,
+                "timeline_end_seconds": cursor + duration,
+                "enabled": True,
+                "source_label": str(raw.get("source_label") or _editor_source_label(source_type))[:120],
+                "source_url": raw.get("source_url"),
+                "status": str(raw.get("status") or "ready")[:80],
+            }
+        )
+        cursor += duration
+    if not normalized:
+        raise ValueError("Editor timeline needs at least one enabled clip.")
+    return {
+        "version": 1,
+        "mode": "editor_timeline_v1",
+        "total_duration_seconds": cursor,
+        "clips": _hydrate_editor_timeline_sources(normalized, run),
+    }
+
+
+def _sync_editor_timeline_sources(run: GenerationRun) -> None:
+    preview = run.preview or {}
+    timeline = preview.get("editor_timeline")
+    if not isinstance(timeline, dict) or not isinstance(timeline.get("clips"), list) or not timeline.get("clips"):
+        return
+    try:
+        normalized = _normalize_editor_timeline(timeline.get("clips") or [], run)
+    except ValueError:
+        return
+    run.preview = {**preview, "editor_timeline": normalized}
+
+
+def _replace_editor_timeline_shot_with_replacement(run: GenerationRun, shot_id: str) -> None:
+    shot_id = str(shot_id or "").strip()
+    if not shot_id:
+        return
+    preview = run.preview or {}
+    timeline = preview.get("editor_timeline")
+    if not isinstance(timeline, dict) or not isinstance(timeline.get("clips"), list) or not timeline.get("clips"):
+        return
+    next_clips: list[dict[str, Any]] = []
+    replaced = False
+    for raw in timeline.get("clips") or []:
+        if not isinstance(raw, dict):
+            continue
+        is_target = str(raw.get("shot_id") or "") == shot_id
+        if is_target and str(raw.get("source_type") or "") == "replacement_clip" and replaced:
+            continue
+        item = dict(raw)
+        if is_target and not replaced and str(item.get("source_type") or "") != "asset_slice":
+            duration = max(1, int(item.get("duration_seconds") or 4))
+            item.update(
+                {
+                    "source_type": "replacement_clip",
+                    "source_start_seconds": 0,
+                    "source_end_seconds": duration,
+                    "duration_seconds": duration,
+                    "source_label": "Replacement clip",
+                    "status": "ready",
+                }
+            )
+            replaced = True
+        next_clips.append(item)
+    if not replaced:
+        return
+    try:
+        normalized = _normalize_editor_timeline(next_clips, run)
+    except ValueError:
+        return
+    run.preview = {**preview, "editor_timeline": normalized}
+
+
+def _hydrate_editor_timeline_sources(clips: list[dict[str, Any]], run: GenerationRun) -> list[dict[str, Any]]:
+    if not clips:
+        return []
+    segments_by_shot = {
+        str(segment.get("shot_id")): segment
+        for segment in (run.preview or {}).get("timeline_segments") or []
+        if isinstance(segment, dict) and segment.get("shot_id")
+    }
+    hydrated: list[dict[str, Any]] = []
+    for clip in clips:
+        item = dict(clip)
+        segment = segments_by_shot.get(str(item.get("shot_id") or ""))
+        if segment:
+            if item["source_type"] == "replacement_clip":
+                item["source_url"] = segment.get("replacement_video_url")
+                item["status"] = segment.get("replacement_status") or segment.get("artifact_status") or item.get("status")
+            elif item["source_type"] == "draft_segment":
+                item["source_url"] = segment.get("draft_video_url")
+                item["status"] = segment.get("artifact_status") or segment.get("task_status") or item.get("status")
+            item["source_label"] = _editor_source_label(str(item["source_type"]))
+        hydrated.append(item)
+    return hydrated
+
+
+def _editor_source_label(source_type: str) -> str:
+    if source_type == "replacement_clip":
+        return "Replacement clip"
+    if source_type == "asset_slice":
+        return "Asset library slice"
+    return "Draft video slice"
+
+
 def _sync_preview_timeline_segments(run: GenerationRun) -> None:
     draft = _draft_video_artifact(run)
     draft_payload = draft.payload if draft else {}
@@ -763,9 +1084,18 @@ def _sync_preview_timeline_segments(run: GenerationRun) -> None:
         replacement = replacements_by_shot.get(str(shot.get("shot_id")))
         replacement_payload = replacement.payload if replacement else {}
         replacement_ready = bool(replacement and replacement.status == "real_generated" and replacement_payload.get("video_url"))
+        selected_slice_id = shot.get("selected_asset_slice_id")
         artifact = replacement if replacement_ready else draft
         payload = replacement_payload if replacement_ready else draft_payload
-        source = "replacement_clip" if replacement_ready else "draft_video"
+        if replacement_ready:
+            source = "replacement_clip"
+            source_label = "Replacement clip"
+        elif selected_slice_id:
+            source = "asset_slice"
+            source_label = "Asset slice"
+        else:
+            source = "draft_video"
+            source_label = "Draft slice"
         timeline_segments.append(
             {
                 "shot_id": shot.get("shot_id"),
@@ -781,17 +1111,20 @@ def _sync_preview_timeline_segments(run: GenerationRun) -> None:
                 "artifact_type": artifact.artifact_type if artifact else None,
                 "artifact_status": artifact.status if artifact else "waiting",
                 "source": source,
-                "source_label": "Replacement clip" if replacement_ready else "Draft slice",
+                "source_label": source_label,
                 "draft_video_url": draft_payload.get("video_url"),
                 "replacement_video_url": replacement_payload.get("video_url"),
                 "task_id": payload.get("task_id"),
                 "task_status": payload.get("task_status"),
-                "video_url": payload.get("video_url"),
+                "video_url": None if source == "asset_slice" else payload.get("video_url"),
                 "last_frame_url": payload.get("last_frame_url"),
                 "prompt": replacement_payload.get("prompt") if replacement_ready else shot.get("video_prompt"),
                 "draft_prompt": draft_payload.get("prompt"),
                 "failure_reason": payload.get("failure_reason"),
                 "mock_reason": payload.get("mock_reason"),
+                "selected_asset_slice_id": str(selected_slice_id) if selected_slice_id else None,
+                "dirty": bool(shot.get("dirty")),
+                "replacement_status": shot.get("replacement_status") or ("ready" if replacement_ready else "none"),
             }
         )
     draft_status = str(draft.status if draft else "").lower()
@@ -905,6 +1238,92 @@ def _event_type_for_agent(agent_name: str) -> str:
     return "agent_completed"
 
 
+def _ordered_storyboard(storyboard: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted([dict(shot) for shot in storyboard if isinstance(shot, dict)], key=lambda item: int(item.get("order_index") or 0))
+
+
+def _storyboard_duration_total(storyboard: list[dict[str, Any]]) -> int:
+    return sum(max(1, int(shot.get("duration_seconds") or 1)) for shot in storyboard)
+
+
+def _legal_timeline_total(value: int) -> int:
+    return max(MIN_TIMELINE_DURATION_SECONDS, min(int(value or DEFAULT_TIMELINE_DURATION_SECONDS), MAX_TIMELINE_DURATION_SECONDS))
+
+
+def _timeline_target_seconds(run: GenerationRun) -> int:
+    storyboard_total = _storyboard_duration_total(_ordered_storyboard(run.storyboard))
+    requested = int(run.script.get("duration_seconds") or run.request_payload.get("duration_seconds") or storyboard_total or DEFAULT_TIMELINE_DURATION_SECONDS)
+    return _legal_timeline_total(requested)
+
+
+def _next_storyboard_shot_id(storyboard: list[dict[str, Any]]) -> str:
+    used = {str(shot.get("shot_id") or "") for shot in storyboard}
+    index = len(storyboard) + 1
+    while f"shot-{index}" in used:
+        index += 1
+    return f"shot-{index}"
+
+
+def _new_storyboard_shot(payload: dict[str, Any], shot_id: str, order_index: int) -> dict[str, Any]:
+    voiceover = str(payload.get("voiceover") or "")
+    subtitle = str(payload.get("subtitle") or voiceover[:90] or payload.get("beat") or "New segment")
+    return {
+        "shot_id": shot_id,
+        "order_index": order_index,
+        "duration_seconds": max(1, int(payload.get("duration_seconds") or 3)),
+        "beat": str(payload.get("beat") or "New beat"),
+        "visual_description": str(payload.get("visual_description") or ""),
+        "camera_motion": str(payload.get("camera_motion") or ""),
+        "voiceover": voiceover,
+        "subtitle": subtitle,
+        "tts_line": str(payload.get("tts_line") or voiceover),
+        "bgm_cue": str(payload.get("bgm_cue") or ""),
+        "linked_factor_keys": [],
+        "image_prompt": str(payload.get("image_prompt") or ""),
+        "video_prompt": str(payload.get("video_prompt") or ""),
+        "selected_asset_slice_id": payload.get("selected_asset_slice_id"),
+        "dirty": True,
+        "replacement_status": "none",
+        "source_mode": "asset_slice" if payload.get("selected_asset_slice_id") else "draft_video",
+    }
+
+
+def _renumber_storyboard(storyboard: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [{**shot, "order_index": index} for index, shot in enumerate(_ordered_storyboard(storyboard), start=1)]
+
+
+def _set_shot_fields(storyboard: list[dict[str, Any]], shot_id: str, updates: dict[str, Any]) -> list[dict[str, Any]] | None:
+    found = False
+    next_storyboard = []
+    for shot in storyboard:
+        item = dict(shot)
+        if item.get("shot_id") == shot_id:
+            item.update(updates)
+            found = True
+        next_storyboard.append(item)
+    return next_storyboard if found else None
+
+
+def _sync_script_duration(run: GenerationRun) -> None:
+    total = _storyboard_duration_total(_ordered_storyboard(run.storyboard))
+    run.script = {
+        **(run.script or {}),
+        "duration_seconds": total,
+        "voiceover_lines": [str(shot.get("voiceover") or "") for shot in _ordered_storyboard(run.storyboard)],
+        "subtitle_lines": [str(shot.get("subtitle") or "") for shot in _ordered_storyboard(run.storyboard)],
+        "tts_lines": [str(shot.get("tts_line") or shot.get("voiceover") or "") for shot in _ordered_storyboard(run.storyboard)],
+    }
+
+
+def _mark_assembly_stale(run: GenerationRun, reason: str) -> None:
+    run.preview = {
+        **(run.preview or {}),
+        "assembly_status": "stale",
+        "assembled_stale": True,
+        "assembly_stale_reason": reason,
+    }
+
+
 def _build_preview_from_storyboard(run: GenerationRun) -> dict[str, Any]:
     cursor = 0
     timeline = []
@@ -944,7 +1363,7 @@ def _reorder_storyboard(storyboard: list[dict[str, Any]], shot_id: str, order_in
 def _normalize_storyboard_duration_total(storyboard: list[dict[str, Any]], target_seconds: int) -> list[dict[str, Any]]:
     if not storyboard:
         return storyboard
-    target = max(1, min(int(target_seconds or 12), 12))
+    target = _legal_timeline_total(int(target_seconds or DEFAULT_TIMELINE_DURATION_SECONDS))
     durations = [max(1, int(shot.get("duration_seconds") or 1)) for shot in storyboard]
     if len(durations) > target:
         durations = [1 for _ in durations]
@@ -957,7 +1376,7 @@ def _normalize_storyboard_duration_total(storyboard: list[dict[str, Any]], targe
     while sum(durations) < target:
         durations[index] += 1
         index = (index - 1) % len(durations)
-    return [{**shot, "duration_seconds": durations[index]} for index, shot in enumerate(storyboard)]
+    return _renumber_storyboard([{**shot, "duration_seconds": durations[index]} for index, shot in enumerate(storyboard)])
 
 
 def _upsert_seedance_shot_clip_artifact(db: Session, run: GenerationRun, artifact: dict[str, Any]) -> None:

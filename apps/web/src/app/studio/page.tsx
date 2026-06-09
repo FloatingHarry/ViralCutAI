@@ -1,16 +1,16 @@
 "use client";
 
 import { useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react";
+import Link from "next/link";
 import {
   CheckCircle2,
   Download,
   FileUp,
   ImageIcon,
-  ArrowDown,
-  ArrowUp,
   Loader2,
   Play,
   RefreshCcw,
+  Scissors,
   Search,
   ShieldCheck,
   Sparkles,
@@ -114,6 +114,30 @@ function artifactMessage(artifact: MediaArtifact) {
   return "";
 }
 
+function factorConfidenceLabel(confidence: number | null | undefined) {
+  if (typeof confidence !== "number" || !Number.isFinite(confidence) || confidence <= 0) {
+    return "provider not scored";
+  }
+  return `${Math.round(confidence)}% confidence`;
+}
+
+function audioSourceLabel(source: unknown) {
+  if (source === "uploaded_audio") {
+    return "Uploaded audio mixed";
+  }
+  if (source === "editor_timeline_audio") {
+    return "Editor timeline audio synced";
+  }
+  if (source === "draft_audio") {
+    return "Draft audio preserved";
+  }
+  return "No audio track";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
 const inputClass =
   "mt-1 h-10 w-full rounded-md border border-black/10 bg-white px-3 text-sm text-slate-950 outline-none transition focus:border-blue-400 focus:ring-4 focus:ring-blue-100";
 const textareaClass =
@@ -121,14 +145,14 @@ const textareaClass =
 
 const initialForm = {
   productName: "Aurora Glow Bottle",
-  category: "drinkware",
-  sellingPoints: "keeps drinks cold, leak-proof lid, soft gradient finish",
-  targetAudience: "young office workers and students",
-  priceOffer: "intro price with free shipping today",
-  materialNotes: "desk, commute, gym bag, and night study moments",
+  category: "beauty & personal care",
+  sellingPoints: "iridescent color-shift finish, premium 100ml bottle, giftable beauty-shelf packaging",
+  targetAudience: "beauty shoppers, fragrance lovers, and gift buyers",
+  priceOffer: "limited launch offer with free shipping today",
+  materialNotes: "vanity table, beauty shelf, gift box, and soft radiant studio lighting",
   creativeGoal: "Generate a conversion-oriented 12-second TikTok Shop product video.",
-  referenceStyle: "fast native short-video demo with close tactile proof shots",
-  visualStyle: "white background, warm daylight, teal and coral accents, clean product close-ups",
+  referenceStyle: "fast native short-video beauty product reveal with premium close-up proof shots",
+  visualStyle: "soft pastel studio, cyan lavender pink glow, reflective surface, clean product close-ups",
   durationSeconds: 12,
   platform: "TikTok Shop",
 };
@@ -151,9 +175,9 @@ function previewFrameClass(aspectRatio: string) {
     return "aspect-video";
   }
   if (aspectRatio === "1:1") {
-    return "aspect-square";
+    return "mx-auto aspect-square max-w-[340px]";
   }
-  return "aspect-[9/16]";
+  return "mx-auto h-[480px] max-w-[270px]";
 }
 
 const activeStatuses = new Set(["queued", "running", "pending", "submitted", "processing", "polling", "real_task_pending"]);
@@ -192,8 +216,21 @@ function timelineSegmentStatusText(segment: TimelineSegment | null) {
     return "Waiting for draft";
   }
   const status = String(segment.artifact_status ?? segment.task_status ?? "").toLowerCase();
+  const replacementStatus = String(segment.replacement_status ?? "").toLowerCase();
+  if (segment.dirty) {
+    return "Dirty";
+  }
+  if (replacementStatus === "queued" || replacementStatus === "processing") {
+    return "Generating";
+  }
+  if (replacementStatus === "failed") {
+    return "Failed";
+  }
   if (segment.source === "replacement_clip" && segment.video_url) {
     return "Replacement ready";
+  }
+  if (segment.source === "asset_slice") {
+    return "Asset slice";
   }
   if (segment.video_url) {
     return "Draft ready";
@@ -221,6 +258,8 @@ export default function StudioPage() {
   const [form, setForm] = useState(initialForm);
   const [files, setFiles] = useState<File[]>([]);
   const [run, setRun] = useState<GenerationRun | null>(null);
+  const [selectedShotId, setSelectedShotId] = useState("");
+  const [segmentAction, setSegmentAction] = useState<string | null>(null);
   const [assetCollections, setAssetCollections] = useState<AssetCollection[]>([]);
   const [libraryAssets, setLibraryAssets] = useState<AssetLibraryItem[]>([]);
   const [viralFactors, setViralFactors] = useState<ViralFactor[]>([]);
@@ -275,6 +314,25 @@ export default function StudioPage() {
     () => run?.preview.timeline_segments ?? (run?.preview.timeline_clips as TimelineSegment[] | undefined) ?? [],
     [run],
   );
+  const timelineTotalSeconds = useMemo(
+    () => sortedStoryboard.reduce((total, shot) => total + Number(shot.duration_seconds || 0), 0),
+    [sortedStoryboard],
+  );
+  const fixedThreeSegmentTimeline = sortedStoryboard.length === 3 && timelineTotalSeconds === 12;
+  const dirtySegmentCount = useMemo(
+    () => sortedStoryboard.filter((shot) => shot.dirty).length + timelineSegments.filter((segment) => segment.dirty).length,
+    [sortedStoryboard, timelineSegments],
+  );
+  const timelineIsStale = run?.preview.assembly_status === "stale" || Boolean(run?.preview.assembled_stale) || dirtySegmentCount > 0;
+  const selectedShot = useMemo(
+    () => sortedStoryboard.find((shot) => shot.shot_id === selectedShotId) ?? sortedStoryboard[0] ?? null,
+    [selectedShotId, sortedStoryboard],
+  );
+  const selectedSegment = useMemo(
+    () => timelineSegments.find((segment) => segment.shot_id === selectedShot?.shot_id) ?? null,
+    [selectedShot, timelineSegments],
+  );
+  const selectedSegmentPreviewUrl = selectedSegment ? segmentVideoUrl(selectedSegment) : null;
   const readySegmentCount = useMemo(
     () => timelineSegments.filter((segment) => typeof segment.video_url === "string" && segment.video_url.length > 0).length,
     [timelineSegments],
@@ -314,6 +372,15 @@ export default function StudioPage() {
   const retrievalEvidence = useMemo(() => run?.strategy.retrieval_evidence ?? [], [run]);
   const assetUsagePlan = useMemo(() => run?.strategy.asset_usage_plan ?? [], [run]);
   const factorSelectionReason = useMemo(() => run?.strategy.factor_selection_reason ?? [], [run]);
+  const selectedViralReference = useMemo(() => {
+    const value = (run?.strategy as Record<string, unknown> | undefined)?.selected_reference_video;
+    return isRecord(value) ? value : null;
+  }, [run]);
+  const referenceMatchReason = String((run?.strategy as Record<string, unknown> | undefined)?.reference_match_reason ?? "");
+  const referenceMatchMode = String((run?.strategy as Record<string, unknown> | undefined)?.reference_match_mode ?? "none");
+  const autoReferenceCount = Array.isArray((run?.strategy as Record<string, unknown> | undefined)?.auto_references)
+    ? ((run?.strategy as Record<string, unknown>).auto_references as unknown[]).length
+    : 0;
   const availableSlices = useMemo(() => {
     const slices = new Map<
       string,
@@ -447,6 +514,7 @@ export default function StudioPage() {
     Promise.all([listAssetCollections(), listAssets(), listViralFactors(), listCreativeTemplates(), listViralVideos()])
       .then(([collections, assets, factors, nextTemplates, videos]) => {
         setAssetCollections(collections);
+        setSelectedAssetCollectionId((current) => current || collections[0]?.id || "");
         setLibraryAssets(assets);
         setViralFactors(factors);
         setTemplates(nextTemplates);
@@ -590,48 +658,34 @@ export default function StudioPage() {
     link.click();
   }
 
+  async function runTimelineAction(actionId: string, action: () => Promise<GenerationRun>, fallbackMessage: string) {
+    setSegmentAction(actionId);
+    setError(null);
+    try {
+      const nextRun = await action();
+      setRun(nextRun);
+      window.localStorage.setItem("viralcutai:lastRunId", nextRun.run_id);
+      return nextRun;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : fallbackMessage);
+      return null;
+    } finally {
+      setSegmentAction(null);
+    }
+  }
+
   async function regenerateShot(shotId: string) {
     if (!run) {
       return;
     }
-    setError(null);
-    try {
-      const nextRun = await regenerateStoryboardShot(run.run_id, shotId);
-      setRun(nextRun);
-      window.localStorage.setItem("viralcutai:lastRunId", nextRun.run_id);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Shot regeneration failed");
-    }
+    await runTimelineAction(`copy:${shotId}`, () => regenerateStoryboardShot(run.run_id, shotId), "Shot regeneration failed");
   }
 
   async function regenerateClip(shotId: string) {
     if (!run) {
       return;
     }
-    setError(null);
-    try {
-      const nextRun = await regenerateShotClip(run.run_id, shotId);
-      setRun(nextRun);
-      window.localStorage.setItem("viralcutai:lastRunId", nextRun.run_id);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Clip regeneration failed");
-    }
-  }
-
-  async function moveShot(shotId: string, direction: -1 | 1) {
-    if (!run) {
-      return;
-    }
-    const currentIndex = sortedStoryboard.findIndex((shot) => shot.shot_id === shotId);
-    const nextIndex = currentIndex + direction;
-    if (currentIndex < 0 || nextIndex < 0 || nextIndex >= sortedStoryboard.length) {
-      return;
-    }
-    await saveShotPatch(shotId, { order_index: sortedStoryboard[nextIndex].order_index });
-  }
-
-  async function saveShotCaption(shotId: string, subtitle: string) {
-    return saveShotPatch(shotId, { subtitle });
+    await runTimelineAction(`clip:${shotId}`, () => regenerateShotClip(run.run_id, shotId), "Clip regeneration failed");
   }
 
   async function saveShotPatch(shotId: string, payload: Partial<GenerationRun["storyboard"][number]>) {
@@ -663,273 +717,254 @@ export default function StudioPage() {
   return (
     <>
       <PageHeader
-        eyebrow="Agent Studio"
-        title="Create an editable AI video draft"
+        eyebrow="Step 3 / Run & Results"
+        title="Run agents and review results"
         description="Run three LangGraph agents to create one continuous Seedance draft, editable timeline segments, compliance checks, and FFmpeg export metadata."
         badges={["AI draft video", "timeline segments", "FFmpeg export"]}
       />
 
-      <section className="grid gap-6 2xl:grid-cols-[360px_minmax(0,1fr)_360px]">
-        <Card className="2xl:sticky 2xl:top-24 2xl:self-start">
-          <CardHeader>
+      <section className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_340px] 2xl:grid-cols-[minmax(0,1fr)_380px]">
+        <Card className="p-4 xl:col-span-2">
+          <CardHeader className="mb-3">
             <div>
-              <CardTitle>Input</CardTitle>
-              <CardDescription>Product context, private assets, and external playbook references for this run.</CardDescription>
+              <CardTitle>Generation Brief</CardTitle>
+              <CardDescription>Define what to generate, which evidence to use, and then run the agents.</CardDescription>
             </div>
             <Sparkles className="h-5 w-5 text-blue-600" />
           </CardHeader>
 
-          <div className="space-y-4">
-            <label className="block text-sm text-slate-700">
-              Product name
-              <input className={inputClass} value={form.productName} onChange={(event) => updateField("productName", event.target.value)} />
-            </label>
-            <div className="grid gap-3 sm:grid-cols-2 2xl:grid-cols-1">
-              <label className="block text-sm text-slate-700">
-                Category
-                <input className={inputClass} value={form.category} onChange={(event) => updateField("category", event.target.value)} />
-              </label>
-              <label className="block text-sm text-slate-700">
-                Platform
-                <input className={inputClass} value={form.platform} onChange={(event) => updateField("platform", event.target.value)} />
-              </label>
-            </div>
-            <label className="block text-sm text-slate-700">
-              Selling points
-              <textarea className={textareaClass} value={form.sellingPoints} onChange={(event) => updateField("sellingPoints", event.target.value)} />
-            </label>
-            <label className="block text-sm text-slate-700">
-              Target audience
-              <input className={inputClass} value={form.targetAudience} onChange={(event) => updateField("targetAudience", event.target.value)} />
-            </label>
-            <label className="block text-sm text-slate-700">
-              Price / offer
-              <input className={inputClass} value={form.priceOffer} onChange={(event) => updateField("priceOffer", event.target.value)} />
-            </label>
-            <label className="block text-sm text-slate-700">
-              Material notes
-              <textarea className={textareaClass} value={form.materialNotes} onChange={(event) => updateField("materialNotes", event.target.value)} />
-            </label>
-            <label className="block text-sm text-slate-700">
-              Reference style
-              <input className={inputClass} value={form.referenceStyle} onChange={(event) => updateField("referenceStyle", event.target.value)} />
-            </label>
-            <label className="block text-sm text-slate-700">
-              Visual style
-              <input className={inputClass} value={form.visualStyle} onChange={(event) => updateField("visualStyle", event.target.value)} />
-            </label>
-            <label className="block text-sm text-slate-700">
-              Duration seconds
-              <input
-                className={inputClass}
-                min={4}
-                max={12}
-                type="number"
-                value={form.durationSeconds}
-                onChange={(event) => updateField("durationSeconds", Number(event.target.value))}
-              />
-              <span className="mt-1 block text-xs leading-5 text-slate-500">
-                Seedance 1.5 renders 4-12s. Studio defaults to a 12s video.
-              </span>
-            </label>
-
-            <div className="rounded-lg border border-dashed border-black/15 bg-[#f5f5f7] p-4">
-              <label className="flex cursor-pointer items-center justify-center gap-2 rounded-md border border-black/10 bg-white px-3 py-2 text-sm font-medium text-slate-700 transition hover:border-blue-200 hover:text-blue-700">
-                <FileUp className="h-4 w-4" />
-                Add image or video
-                <input
-                  className="sr-only"
-                  multiple
-                  type="file"
-                  accept="image/*,video/*,audio/*"
-                  onChange={(event) => setFiles(Array.from(event.target.files ?? []))}
-                />
-              </label>
-              <div className="mt-3 space-y-2">
-                {files.map((file) => (
-                  <div key={`${file.name}-${file.size}`} className="flex items-center justify-between gap-3 rounded-md bg-white px-3 py-2">
-                    <span className="min-w-0 truncate text-xs text-slate-700">{file.name}</span>
-                    <Badge>{Math.max(1, Math.round(file.size / 1024))} KB</Badge>
-                  </div>
-                ))}
-                {!files.length ? <p className="text-center text-xs leading-5 text-slate-500">No files selected. Optional audio can be uploaded as BGM for local assembly.</p> : null}
+          <div className="grid gap-4 2xl:grid-cols-[minmax(0,1.35fr)_minmax(360px,0.85fr)]">
+            <div className="grid gap-3">
+              <div className="grid gap-3 md:grid-cols-[minmax(0,1.4fr)_minmax(0,0.9fr)_minmax(0,0.8fr)]">
+                <label className="block text-sm font-medium text-slate-700">
+                  Product name
+                  <input className={inputClass} value={form.productName} onChange={(event) => updateField("productName", event.target.value)} />
+                </label>
+                <label className="block text-sm font-medium text-slate-700">
+                  Category
+                  <input className={inputClass} value={form.category} onChange={(event) => updateField("category", event.target.value)} />
+                </label>
+                <label className="block text-sm font-medium text-slate-700">
+                  Platform
+                  <input className={inputClass} value={form.platform} onChange={(event) => updateField("platform", event.target.value)} />
+                </label>
               </div>
+
+              <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+                <label className="block text-sm font-medium text-slate-700">
+                  Selling points
+                  <textarea className={`${textareaClass} min-h-24`} value={form.sellingPoints} onChange={(event) => updateField("sellingPoints", event.target.value)} />
+                </label>
+                <label className="block text-sm font-medium text-slate-700">
+                  Material and scene notes
+                  <textarea className={`${textareaClass} min-h-24`} value={form.materialNotes} onChange={(event) => updateField("materialNotes", event.target.value)} />
+                </label>
+              </div>
+
+              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                <label className="block text-sm font-medium text-slate-700">
+                  Target audience
+                  <input className={inputClass} value={form.targetAudience} onChange={(event) => updateField("targetAudience", event.target.value)} />
+                </label>
+                <label className="block text-sm font-medium text-slate-700">
+                  Price / offer
+                  <input className={inputClass} value={form.priceOffer} onChange={(event) => updateField("priceOffer", event.target.value)} />
+                </label>
+                <label className="block text-sm font-medium text-slate-700">
+                  Reference style
+                  <input className={inputClass} value={form.referenceStyle} onChange={(event) => updateField("referenceStyle", event.target.value)} />
+                </label>
+                <label className="block text-sm font-medium text-slate-700">
+                  Visual style
+                  <input className={inputClass} value={form.visualStyle} onChange={(event) => updateField("visualStyle", event.target.value)} />
+                </label>
+              </div>
+
+              <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_160px]">
+                <label className="block text-sm font-medium text-slate-700">
+                  Creative goal
+                  <input className={inputClass} value={form.creativeGoal} onChange={(event) => updateField("creativeGoal", event.target.value)} />
+                </label>
+                <label className="block text-sm font-medium text-slate-700">
+                  Duration
+                  <input className={inputClass} disabled min={12} max={12} type="number" value={form.durationSeconds} onChange={() => updateField("durationSeconds", 12)} />
+                </label>
+              </div>
+              <p className="text-xs leading-5 text-slate-500">V1 uses a fixed 12s structure: Hook 4s, Proof + Use 4s, CTA 4s.</p>
             </div>
 
-            <div className="rounded-lg border border-black/10 bg-[#f5f5f7] p-4">
-              <p className="text-sm font-medium text-slate-950">Run inputs</p>
-              <p className="mt-1 text-xs leading-5 text-slate-500">My Assets provide private product evidence. Viral Library provides external playbook factors.</p>
-              <div className="mt-3 space-y-3">
-                <div className="grid gap-2 rounded-md bg-white p-2">
-                  {[
-                    { value: "auto_mix", label: "Auto Mix", detail: "Retrieve references, templates, and factors automatically." },
-                    { value: "viral_rewrite", label: "Viral Rewrite", detail: "Use one selected reference as the structure to rewrite." },
-                    { value: "template_fusion", label: "Template Fusion", detail: "Use one selected template as the creative playbook." },
-                  ].map((item) => (
-                    <label
-                      key={item.value}
-                      className={`flex cursor-pointer items-start gap-3 rounded-md border p-3 text-xs transition ${
-                        generationMode === item.value ? "border-blue-200 bg-blue-50 text-blue-900" : "border-black/10 bg-white text-slate-700"
-                      }`}
-                    >
+            <div className="grid gap-3 rounded-lg border border-black/10 bg-[#f5f5f7] p-3">
+              <div className="grid grid-cols-3 gap-2">
+                {[
+                  { value: "auto_mix", label: "Auto Mix" },
+                  { value: "viral_rewrite", label: "Reference" },
+                  { value: "template_fusion", label: "Template" },
+                ].map((item) => (
+                  <button
+                    key={item.value}
+                    className={`rounded-md border px-3 py-2 text-xs font-semibold transition ${
+                      generationMode === item.value ? "border-blue-200 bg-blue-50 text-blue-700" : "border-black/10 bg-white text-slate-600"
+                    }`}
+                    type="button"
+                    onClick={() => setGenerationMode(item.value as typeof generationMode)}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
+
+              <div className="grid gap-2 md:grid-cols-2 2xl:grid-cols-1">
+                <label className="block text-xs font-medium text-slate-700">
+                  Asset collection
+                  <select className={inputClass} value={selectedAssetCollectionId} onChange={(event) => setSelectedAssetCollectionId(event.target.value)}>
+                    <option value="">No private collection</option>
+                    {assetCollections.map((collection) => (
+                      <option key={collection.id} value={collection.id}>
+                        {collection.product_name} / {collection.category}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="block text-xs font-medium text-slate-700">
+                  Viral reference
+                  <select className={inputClass} value={selectedReferenceId} onChange={(event) => setSelectedReferenceId(event.target.value)}>
+                    <option value="">{generationMode === "viral_rewrite" ? "Select a reference" : "Auto / none"}</option>
+                    {references.map((item) => (
+                      <option key={item.id} value={item.id}>
+                        {item.title}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="block text-xs font-medium text-slate-700 md:col-span-2 2xl:col-span-1">
+                  Template
+                  <select className={inputClass} value={selectedTemplateId} onChange={(event) => setSelectedTemplateId(event.target.value)}>
+                    <option value="">{generationMode === "template_fusion" ? "Select a template" : "Auto / none"}</option>
+                    {templates.map((item) => (
+                      <option key={item.id} value={item.id}>
+                        {item.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+
+              {selectedAssetCollection ? (
+                <div className="rounded-md border border-blue-100 bg-blue-50 p-3">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p className="min-w-0 flex-1 truncate text-xs font-semibold text-blue-950">{selectedAssetCollection.product_name}</p>
+                    <Badge>{selectedAssetCollection.assets.length} assets</Badge>
+                  </div>
+                  <p className="mt-1 line-clamp-2 text-xs leading-5 text-blue-800">{selectedAssetCollection.summary}</p>
+                </div>
+              ) : null}
+
+              <div className="grid gap-2 rounded-md bg-white p-3">
+                <div className="flex items-center gap-2">
+                  <input className={inputClass} value={assetSearchQuery} onChange={(event) => setAssetSearchQuery(event.target.value)} placeholder="Search asset evidence" />
+                  <Button size="icon" variant="outline" onClick={runAssetSearch} disabled={assetSearching} aria-label="Search saved assets">
+                    {assetSearching ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
+                  </Button>
+                </div>
+                <div className="max-h-32 overflow-auto pr-1">
+                  {assetSearchResults.map((result) => (
+                    <label key={result.asset.id} className="mt-2 flex items-start gap-2 rounded-md bg-[#f5f5f7] p-2 text-xs text-slate-700">
                       <input
-                        className="mt-0.5"
-                        type="radio"
-                        checked={generationMode === item.value}
-                        onChange={() => setGenerationMode(item.value as typeof generationMode)}
+                        className="mt-1"
+                        type="checkbox"
+                        checked={selectedAssetIds.includes(result.asset.id)}
+                        onChange={(event) => toggleValue(setSelectedAssetIds, result.asset.id, event.target.checked)}
                       />
                       <span className="min-w-0">
-                        <span className="block font-medium">{item.label}</span>
-                        <span className="mt-1 block leading-5 text-slate-500">{item.detail}</span>
+                        <span className="line-clamp-1 font-medium text-slate-950">{result.asset.filename}</span>
+                        <span className="mt-1 line-clamp-2 leading-5 text-slate-500">{Math.round(result.score * 100)} match / {result.reason}</span>
                       </span>
                     </label>
                   ))}
+                  {!assetSearchResults.length ? <p className="py-2 text-xs leading-5 text-slate-500">Optional: search saved assets to pin stronger evidence.</p> : null}
                 </div>
-                <div className="grid gap-2 rounded-md bg-white p-3">
-                  <label className="block text-xs text-slate-700">
-                    Asset collection
-                    <select className={inputClass} value={selectedAssetCollectionId} onChange={(event) => setSelectedAssetCollectionId(event.target.value)}>
-                      <option value="">No private collection</option>
-                      {assetCollections.map((collection) => (
-                        <option key={collection.id} value={collection.id}>
-                          {collection.product_name} / {collection.category}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  {selectedAssetCollection ? (
-                    <div className="rounded-md border border-blue-100 bg-blue-50 p-3">
-                      <p className="text-xs font-medium text-blue-900">{selectedAssetCollection.product_name}</p>
-                      <p className="mt-1 text-xs leading-5 text-blue-800">{selectedAssetCollection.summary}</p>
-                      <div className="mt-2 flex flex-wrap gap-2">
-                        <Badge>{selectedAssetCollection.status}</Badge>
-                        <Badge>{selectedAssetCollection.assets.length} assets</Badge>
-                      </div>
-                    </div>
-                  ) : null}
-                  <label className="flex items-center justify-between gap-3 text-xs text-slate-700">
-                    <span>Auto-retrieve from My Assets</span>
-                    <input
-                      type="checkbox"
-                      checked={autoRetrieveAssets}
-                      onChange={(event) => setAutoRetrieveAssets(event.target.checked)}
-                    />
-                  </label>
-                  <label className="flex items-center justify-between gap-3 text-xs text-slate-700">
-                    <span>Auto-retrieve from Viral Library</span>
-                    <input
-                      type="checkbox"
-                      checked={autoRetrieveFactors}
-                      onChange={(event) => setAutoRetrieveFactors(event.target.checked)}
-                    />
-                  </label>
-                </div>
-                <div className="rounded-md bg-white p-3">
-                  <div className="flex gap-2">
-                    <input
-                      className={inputClass}
-                      value={assetSearchQuery}
-                      onChange={(event) => setAssetSearchQuery(event.target.value)}
-                      placeholder="Find private asset evidence"
-                    />
-                    <Button size="icon" variant="outline" onClick={runAssetSearch} disabled={assetSearching} aria-label="Search saved assets">
-                      {assetSearching ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
-                    </Button>
-                  </div>
-                  <div className="mt-3 grid max-h-56 gap-2 overflow-auto">
-                    {assetSearchResults.map((result) => (
-                      <div key={result.asset.id} className="rounded-md border border-black/10 bg-[#f5f5f7] p-3">
-                        <label className="flex items-start gap-2 text-xs text-slate-700">
-                          <input
-                            className="mt-1"
-                            type="checkbox"
-                            checked={selectedAssetIds.includes(result.asset.id)}
-                            onChange={(event) => toggleValue(setSelectedAssetIds, result.asset.id, event.target.checked)}
-                          />
-                          <span className="min-w-0">
-                            <span className="block font-medium text-slate-950">{result.asset.filename}</span>
-                            <span className="mt-1 block leading-5 text-slate-500">
-                              {Math.round(result.score * 100)} match / {result.reason}
-                            </span>
-                          </span>
-                        </label>
-                        {result.matched_slices.length ? (
-                          <div className="mt-2 grid gap-2">
-                            {result.matched_slices.map((slice) => (
-                              <label key={slice.slice_id} className="flex items-start gap-2 rounded bg-white p-2 text-xs text-slate-700">
-                                <input
-                                  className="mt-1"
-                                  type="checkbox"
-                                  checked={selectedAssetSliceIds.includes(slice.slice_id)}
-                                  onChange={(event) => toggleValue(setSelectedAssetSliceIds, slice.slice_id, event.target.checked)}
-                                />
-                                <span className="min-w-0">
-                                  <span className="font-medium text-slate-950">Slice {slice.order_index}</span>
-                                  <span className="ml-2 text-slate-400">{slice.usable_for ?? "evidence"}</span>
-                                  <span className="mt-1 block leading-5 text-slate-500">{slice.summary}</span>
-                                </span>
-                              </label>
-                            ))}
-                          </div>
-                        ) : null}
-                      </div>
-                    ))}
-                    {!assetSearchResults.length ? <p className="text-xs leading-5 text-slate-500">Search My Assets to pin stronger product evidence.</p> : null}
-                  </div>
-                </div>
-                <select className={inputClass} value={selectedReferenceId} onChange={(event) => setSelectedReferenceId(event.target.value)}>
-                  <option value="">{generationMode === "viral_rewrite" ? "Select a reference for Viral Rewrite" : "No external reference"}</option>
-                  {references.map((item) => (
-                    <option key={item.id} value={item.id}>
-                      {item.title}
-                    </option>
-                  ))}
-                </select>
-                <select className={inputClass} value={selectedTemplateId} onChange={(event) => setSelectedTemplateId(event.target.value)}>
-                  <option value="">{generationMode === "template_fusion" ? "Select a template for Template Fusion" : "No viral template"}</option>
-                  {templates.map((item) => (
-                    <option key={item.id} value={item.id}>
-                      {item.name}
-                    </option>
-                  ))}
-                </select>
-                <div className="grid max-h-40 gap-2 overflow-auto rounded-md bg-white p-2">
-                  {visibleLibraryAssets.slice(0, 6).map((asset) => (
-                    <label key={asset.id} className="flex items-center gap-2 text-xs text-slate-700">
+              </div>
+
+              <div className="grid gap-2 rounded-md bg-white p-3">
+                <p className="text-xs font-semibold text-slate-700">Manual pins</p>
+                <div className="grid max-h-32 gap-2 overflow-auto pr-1 md:grid-cols-2 2xl:grid-cols-1">
+                  {visibleLibraryAssets.slice(0, 4).map((asset) => (
+                    <label key={asset.id} className="flex min-w-0 items-center gap-2 text-xs text-slate-700">
                       <input
                         type="checkbox"
                         checked={selectedAssetIds.includes(asset.id)}
                         onChange={(event) => toggleValue(setSelectedAssetIds, asset.id, event.target.checked)}
                       />
-                      <span className="min-w-0 truncate">{asset.filename}</span>
+                      <span className="truncate">{asset.filename}</span>
                     </label>
                   ))}
-                  {!visibleLibraryAssets.length ? <p className="text-xs text-slate-500">No private assets in this collection yet.</p> : null}
-                </div>
-                <div className="grid max-h-40 gap-2 overflow-auto rounded-md bg-white p-2">
-                  {viralFactors.slice(0, 8).map((factor) => (
-                    <label key={factor.id} className="flex items-center gap-2 text-xs text-slate-700">
+                  {viralFactors.slice(0, 4).map((factor) => (
+                    <label key={factor.id} className="flex min-w-0 items-center gap-2 text-xs text-slate-700">
                       <input
                         type="checkbox"
                         checked={selectedFactorIds.includes(factor.id)}
                         onChange={(event) => toggleValue(setSelectedFactorIds, factor.id, event.target.checked)}
                       />
-                      <span className="min-w-0 truncate">
-                        {factor.category}: {factor.name}
-                      </span>
+                      <span className="truncate">{factor.category}: {factor.name}</span>
                     </label>
                   ))}
-                  {!viralFactors.length ? <p className="text-xs text-slate-500">No external viral factors yet.</p> : null}
+                  {assetSearchResults.flatMap((result) => result.matched_slices).slice(0, 4).map((slice) => (
+                    <label key={slice.slice_id} className="flex min-w-0 items-center gap-2 text-xs text-slate-700">
+                      <input
+                        type="checkbox"
+                        checked={selectedAssetSliceIds.includes(slice.slice_id)}
+                        onChange={(event) => toggleValue(setSelectedAssetSliceIds, slice.slice_id, event.target.checked)}
+                      />
+                      <span className="truncate">Slice {slice.order_index}: {slice.summary}</span>
+                    </label>
+                  ))}
                 </div>
+                {!visibleLibraryAssets.length && !viralFactors.length && !assetSearchResults.length ? (
+                  <p className="text-xs leading-5 text-slate-500">No manual items available yet. Auto retrieval can still run.</p>
+                ) : null}
+              </div>
+
+              <div className="grid gap-2 md:grid-cols-2 2xl:grid-cols-1">
+                <label className="flex items-center justify-between gap-3 rounded-md bg-white px-3 py-2 text-xs text-slate-700">
+                  <span>Auto assets</span>
+                  <input type="checkbox" checked={autoRetrieveAssets} onChange={(event) => setAutoRetrieveAssets(event.target.checked)} />
+                </label>
+                <label className="flex items-center justify-between gap-3 rounded-md bg-white px-3 py-2 text-xs text-slate-700">
+                  <span>Auto factors</span>
+                  <input type="checkbox" checked={autoRetrieveFactors} onChange={(event) => setAutoRetrieveFactors(event.target.checked)} />
+                </label>
+              </div>
+
+              <label className="flex cursor-pointer items-center justify-center gap-2 rounded-md border border-dashed border-black/15 bg-white px-3 py-2 text-sm font-medium text-slate-700 transition hover:border-blue-200 hover:text-blue-700">
+                <FileUp className="h-4 w-4" />
+                Attach files
+                <input className="sr-only" multiple type="file" accept="image/*,video/*,audio/*" onChange={(event) => setFiles(Array.from(event.target.files ?? []))} />
+              </label>
+              {files.length ? (
+                <div className="flex flex-wrap gap-1">
+                  {files.slice(0, 4).map((file) => (
+                    <Badge key={`${file.name}-${file.size}`} className="max-w-full">
+                      <span className="truncate">{file.name}</span>
+                    </Badge>
+                  ))}
+                  {files.length > 4 ? <Badge>+{files.length - 4}</Badge> : null}
+                </div>
+              ) : null}
+
+              <div className="grid gap-2 md:grid-cols-[minmax(0,1fr)_auto] 2xl:grid-cols-1">
+                <div className="flex flex-wrap gap-1">
+                  {selectedAssetIds.length ? <Badge>{selectedAssetIds.length} assets pinned</Badge> : null}
+                  {selectedFactorIds.length ? <Badge>{selectedFactorIds.length} factors pinned</Badge> : null}
+                  {!selectedAssetIds.length && !selectedFactorIds.length ? <span className="text-xs leading-6 text-slate-500">Auto retrieval will choose the best evidence.</span> : null}
+                </div>
+                <Button variant="secondary" onClick={runAgents} disabled={loading || generationActive}>
+                  {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+                  {loading ? "Queueing" : generationActive ? "Running" : "Run agents"}
+                </Button>
               </div>
             </div>
-
-            <Button className="w-full" variant="secondary" onClick={runAgents} disabled={loading || generationActive}>
-              {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
-              {loading ? "Queueing run" : generationActive ? "Run in progress" : "Run three agents"}
-            </Button>
-            {error ? <p className="rounded-md border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{error}</p> : null}
           </div>
+          {error ? <p className="mt-4 rounded-md border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{error}</p> : null}
         </Card>
 
         <main className="grid gap-6">
@@ -995,17 +1030,17 @@ export default function StudioPage() {
             })}
           </section>
 
-          <Card>
-            <CardHeader>
+          <Card className="p-4">
+            <CardHeader className="mb-3">
               <div>
-                <CardTitle>Provider Outputs</CardTitle>
-                <CardDescription>Each capability reports whether it produced real output, is not connected, or failed.</CardDescription>
+                <CardTitle>Output Check</CardTitle>
+                <CardDescription>Compare generated capabilities and provider state at a glance.</CardDescription>
               </div>
               <ShieldCheck className="h-5 w-5 text-emerald-600" />
             </CardHeader>
-            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-6">
+            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-6">
               {capabilityRows.map((capability) => (
-                <div key={capability.name} className="rounded-lg border border-black/10 bg-[#f5f5f7] p-4">
+                <div key={capability.name} className="rounded-lg border border-black/10 bg-[#f5f5f7] p-3">
                   <div className="flex items-center justify-between gap-2">
                     <p className="text-sm font-medium text-slate-950">{capability.name}</p>
                     {capability.artifact ? (
@@ -1024,8 +1059,8 @@ export default function StudioPage() {
             </div>
           </Card>
 
-          <Card>
-            <CardHeader>
+          <Card className="p-4">
+            <CardHeader className="mb-3">
               <div>
                 <CardTitle>Run Progress</CardTitle>
                 <CardDescription>{run?.summary ?? "Events update while the background run is active."}</CardDescription>
@@ -1033,8 +1068,8 @@ export default function StudioPage() {
               <CheckCircle2 className="h-5 w-5 text-emerald-600" />
             </CardHeader>
             <div className="grid gap-3 md:grid-cols-2">
-              {(run?.events ?? []).map((event) => (
-                <div key={event.id} className="rounded-lg border border-black/10 bg-[#f5f5f7] p-4">
+              {(run?.events ?? []).slice(-8).map((event) => (
+                <div key={event.id} className="rounded-lg border border-black/10 bg-[#f5f5f7] p-3">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <p className="text-sm font-medium text-slate-950">{event.event_type.replaceAll("_", " ")}</p>
                     <Badge className={event.status === "failed" ? "border-rose-200 bg-rose-50 text-rose-700" : ""}>{event.status}</Badge>
@@ -1050,16 +1085,14 @@ export default function StudioPage() {
             </div>
           </Card>
 
-          <Card>
-            <CardHeader>
-              <div>
-                <CardTitle>Strategy</CardTitle>
-                <CardDescription>{run?.strategy.source_asset_summary ?? "The strategy agent will reference uploaded assets when available."}</CardDescription>
-              </div>
+          <details className="rounded-lg border border-black/10 bg-white p-4 shadow-sm shadow-black/[0.03]">
+            <summary className="flex cursor-pointer items-center justify-between gap-3 text-sm font-semibold text-slate-950">
+              Strategy Details
               <Sparkles className="h-5 w-5 text-blue-600" />
-            </CardHeader>
+            </summary>
+            <p className="mt-1 text-xs leading-5 text-slate-500">{run?.strategy.source_asset_summary ?? "The strategy agent will reference uploaded assets when available."}</p>
             {run ? (
-              <div className="grid gap-4 lg:grid-cols-2">
+              <div className="mt-4 grid gap-4 lg:grid-cols-2">
                 <div className="rounded-lg border border-black/10 bg-[#f5f5f7] p-4">
                   <p className="text-xs text-slate-500">Hook</p>
                   {run.strategy.generation_mode ? <Badge className="mb-2 mt-2">{String(run.strategy.generation_mode).replaceAll("_", " ")}</Badge> : null}
@@ -1068,6 +1101,37 @@ export default function StudioPage() {
                 <div className="rounded-lg border border-black/10 bg-[#f5f5f7] p-4">
                   <p className="text-xs text-slate-500">Product angle</p>
                   <p className="mt-2 text-sm leading-6 text-slate-700">{run.strategy.product_angle}</p>
+                </div>
+                <div className="rounded-lg border border-black/10 bg-[#f5f5f7] p-4 lg:col-span-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <p className="text-xs text-slate-500">Viral reference match</p>
+                    <div className="flex flex-wrap gap-2">
+                      <Badge className={selectedViralReference ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-amber-200 bg-amber-50 text-amber-700"}>
+                        {selectedViralReference ? "Strong reference selected" : "No strong reference"}
+                      </Badge>
+                      <Badge>{referenceMatchMode}</Badge>
+                    </div>
+                  </div>
+                  {selectedViralReference ? (
+                    <div className="mt-3 rounded-md border border-black/10 bg-white p-3">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Badge>{String(selectedViralReference.category ?? "reference")}</Badge>
+                        <Badge>{Boolean(selectedViralReference.visual_verified) ? "video verified" : "structured only"}</Badge>
+                        <Badge>{autoReferenceCount} auto reference</Badge>
+                      </div>
+                      <p className="mt-2 break-words text-sm font-medium text-slate-950">{String(selectedViralReference.title ?? "Selected viral reference")}</p>
+                      <p className="mt-1 break-words text-xs leading-5 text-slate-500">
+                        {referenceMatchReason || "Best matched viral reference selected for this run."}
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 p-3">
+                      <p className="text-sm font-medium text-amber-900">Default commerce structure is being used.</p>
+                      <p className="mt-1 text-xs leading-5 text-amber-800">
+                        {referenceMatchReason || "No strong viral reference match found; the strategy uses default commerce factors instead of forcing an unrelated FastMoss reference."}
+                      </p>
+                    </div>
+                  )}
                 </div>
                 <div className="rounded-lg border border-black/10 bg-[#f5f5f7] p-4 lg:col-span-2">
                   <div className="flex flex-wrap items-center justify-between gap-2">
@@ -1137,7 +1201,7 @@ export default function StudioPage() {
                         </div>
                         <p className="mt-1 text-xs leading-5 text-slate-500">{factor.reason}</p>
                         <p className="mt-2 text-xs leading-5 text-blue-700">{factor.expected_effect}</p>
-                        <p className="mt-2 font-mono text-[11px] text-slate-400">{factor.confidence}% confidence / {factor.source}</p>
+                        <p className="mt-2 font-mono text-[11px] text-slate-400">{factorConfidenceLabel(factor.confidence)} / {factor.source}</p>
                       </div>
                     ))}
                   </div>
@@ -1146,212 +1210,283 @@ export default function StudioPage() {
             ) : (
               <EmptyState text="No strategy yet." />
             )}
-          </Card>
+          </details>
 
           <Card>
+            <CardHeader>
+              <div>
+                <CardTitle>Video Editor</CardTitle>
+                <CardDescription>
+                  {run
+                    ? `${readySegmentCount}/3 generated segments are available. Continue trimming, cutting, appending, and assembling on the dedicated editor page.`
+                    : "Generate a run first, then open the dedicated editor page."}
+                </CardDescription>
+              </div>
+              <Scissors className="h-5 w-5 text-rose-600" />
+            </CardHeader>
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-black/10 bg-[#f5f5f7] p-4">
+              <div className="min-w-0">
+                <p className="text-sm font-medium text-slate-950">Timeline assembly moved out of Studio</p>
+                <p className="mt-1 text-xs leading-5 text-slate-500">
+                  Studio remains the generation surface. Editor handles trimming, cuts, replacement clips, asset slices, and final FFmpeg assembly.
+                </p>
+              </div>
+              <Link href="/editor">
+                <Button variant="secondary" disabled={!run}>
+                  <Scissors className="h-4 w-4" />
+                  Open Editor
+                </Button>
+              </Link>
+            </div>
+          </Card>
+
+          <Card className="hidden">
             <CardHeader>
               <div>
                 <CardTitle>Editing Workbench</CardTitle>
                 <CardDescription>
                   {run
-                    ? `${readySegmentCount}/${sortedStoryboard.length} timeline segments ready. Edit one segment, regenerate it as a replacement, then assemble the final MP4.`
+                    ? fixedThreeSegmentTimeline
+                      ? `${readySegmentCount}/3 fixed storyboard segments ready. Edit one segment, regenerate it as a replacement, then assemble the final MP4.`
+                      : `${sortedStoryboard.length} segments on this older run. Create a fresh run to use the fixed 3-segment editor.`
                     : "AI draft slices and editable timeline segment controls appear after generation."}
                 </CardDescription>
               </div>
               <Video className="h-5 w-5 text-rose-600" />
             </CardHeader>
             {run ? (
-              <div className="space-y-3">
-                <div className="rounded-lg border border-blue-100 bg-blue-50 p-4">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <p className="text-sm font-medium text-blue-950">AI draft timeline</p>
-                    <Badge className={draftVideoReady ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-blue-200 bg-blue-50 text-blue-700"}>
-                      {draftVideoReady ? "Draft ready" : "Waiting for draft"}
-                    </Badge>
+              <div className="space-y-4">
+                <div className="rounded-lg border border-black/10 bg-[#f5f5f7] p-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div className="min-w-0">
+                        <p className="text-sm font-medium text-slate-950">Fixed 3-Segment Storyboard Editor</p>
+                        <div className="mt-2 flex flex-wrap items-center gap-2">
+                        <Badge>{fixedThreeSegmentTimeline ? "3/3 fixed segments" : `${sortedStoryboard.length} segment legacy run`}</Badge>
+                        <Badge>{timelineTotalSeconds}s total</Badge>
+                        <Badge className={draftVideoReady ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-blue-200 bg-blue-50 text-blue-700"}>
+                          {draftVideoReady ? "Draft ready" : "Waiting for draft"}
+                        </Badge>
+                        {timelineIsStale ? <Badge className="border-amber-200 bg-amber-50 text-amber-700">Stale</Badge> : null}
+                      </div>
+                    </div>
                   </div>
-                  <p className="mt-2 text-xs leading-5 text-blue-800">
-                    Seedance generates one continuous 12-second draft. FFmpeg cuts it into storyboard segments, swaps in any replacement clips, burns subtitles, and exports the publishable MP4.
-                  </p>
+
+                  <div className="mt-4 flex min-h-24 gap-2 overflow-x-auto pb-1">
+                    {sortedStoryboard.map((shot) => {
+                      const segment = timelineSegments.find((item) => item.shot_id === shot.shot_id) ?? null;
+                      const active = selectedShot?.shot_id === shot.shot_id;
+                      const status = timelineSegmentStatusText(segment);
+                      const failed = status.toLowerCase().includes("failed");
+                      const generating = status.toLowerCase().includes("generating") || segmentAction === `clip:${shot.shot_id}`;
+                      const ready = Boolean(segment?.source === "replacement_clip" || segment?.source === "asset_slice" || segment?.video_url);
+                      return (
+                        <button
+                          key={shot.shot_id}
+                          className={`min-w-36 rounded-md border p-3 text-left transition ${
+                            active
+                              ? "border-blue-300 bg-white shadow-sm shadow-blue-100"
+                              : "border-black/10 bg-white/75 hover:border-blue-200 hover:bg-white"
+                          }`}
+                          style={{ flexGrow: Math.max(1, Number(shot.duration_seconds || 1)) }}
+                          type="button"
+                          onClick={() => setSelectedShotId(shot.shot_id)}
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <Badge>Shot {shot.order_index}</Badge>
+                            <span className="font-mono text-[11px] text-slate-500">{shot.duration_seconds}s</span>
+                          </div>
+                          <p className="mt-2 truncate text-sm font-medium text-slate-950">{shot.beat}</p>
+                          <div className="mt-2 flex flex-wrap gap-1">
+                            <Badge className={failed ? "border-rose-200 bg-rose-50 text-rose-700" : generating ? "border-blue-200 bg-blue-50 text-blue-700" : ready ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-slate-200 bg-slate-50 text-slate-600"}>
+                              {status}
+                            </Badge>
+                            <Badge>{segment?.source_label ?? "Draft"}</Badge>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
 
-                {sortedStoryboard.map((shot, index) => {
-                  const segment = timelineSegments.find((item) => item.shot_id === shot.shot_id) ?? null;
-                  const segmentFailed = String(segment?.artifact_status ?? segment?.task_status ?? "").toLowerCase().includes("failed");
-                  const previewUrl = segment ? segmentVideoUrl(segment) : null;
-                  return (
-                    <div key={shot.shot_id} className="rounded-lg border border-black/10 bg-white p-4 shadow-sm shadow-black/[0.03]">
+                {selectedShot ? (
+                  <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
+                    <div className="rounded-lg border border-black/10 bg-white p-4">
                       <div className="flex flex-wrap items-center justify-between gap-2">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <Badge>Shot {shot.order_index}</Badge>
-                          <span className="font-mono text-xs text-slate-500">{shot.duration_seconds}s</span>
-                          <Badge>{segment?.source_label ?? "Draft slice"}</Badge>
-                          <Badge className={segment?.video_url ? "border-emerald-200 bg-emerald-50 text-emerald-700" : segmentFailed ? "border-rose-200 bg-rose-50 text-rose-700" : "border-blue-200 bg-blue-50 text-blue-700"}>
-                            {timelineSegmentStatusText(segment)}
-                          </Badge>
+                        <div className="min-w-0">
+                          <p className="text-sm font-medium text-slate-950">
+                            Shot {selectedShot.order_index}: {selectedShot.beat}
+                          </p>
+                          <p className="mt-1 font-mono text-[11px] text-slate-400">{selectedSegment?.time_range ?? `${selectedShot.duration_seconds}s segment`}</p>
                         </div>
-                        <div className="flex items-center gap-2">
-                          <Button size="icon" variant="outline" onClick={() => void moveShot(shot.shot_id, -1)} disabled={index === 0} aria-label="Move shot up">
-                            <ArrowUp className="h-4 w-4" />
-                          </Button>
-                          <Button size="icon" variant="outline" onClick={() => void moveShot(shot.shot_id, 1)} disabled={index === sortedStoryboard.length - 1} aria-label="Move shot down">
-                            <ArrowDown className="h-4 w-4" />
-                          </Button>
-                        </div>
+                        <Badge>{timelineSegmentStatusText(selectedSegment)}</Badge>
                       </div>
-
-                      <div className="mt-4 grid gap-4 xl:grid-cols-[220px_minmax(0,1fr)]">
-                        <div className="overflow-hidden rounded-lg border border-black/10 bg-slate-950">
-                          {previewUrl ? (
-                            <video className="aspect-[9/16] w-full object-cover" controls src={previewUrl} />
+                      <div className="mt-4 grid gap-4 lg:grid-cols-[220px_minmax(0,1fr)]">
+                        <div className="overflow-hidden rounded-md border border-black/10 bg-slate-950">
+                          {selectedSegmentPreviewUrl ? (
+                            <video className="aspect-[9/16] w-full object-cover" controls src={selectedSegmentPreviewUrl} />
                           ) : (
                             <div className="flex aspect-[9/16] flex-col justify-between p-4 text-white">
                               <div>
-                                <p className="text-xs text-white/50">{timelineSegmentStatusText(segment)}</p>
-                                <p className="mt-3 text-sm font-medium leading-5">{shot.beat}</p>
+                                <p className="text-xs text-white/50">{timelineSegmentStatusText(selectedSegment)}</p>
+                                <p className="mt-3 text-sm font-medium leading-5">{selectedShot.beat}</p>
                               </div>
                               <p className="break-words text-[11px] leading-5 text-white/55">
-                                {segment?.failure_reason ? humanizeProviderText(segment.failure_reason) : segment?.task_id ? `Task ${segment.task_id}` : "Draft segment appears here when Seedance finishes."}
+                                {selectedSegment?.failure_reason
+                                  ? humanizeProviderText(selectedSegment.failure_reason)
+                                  : selectedSegment?.source === "asset_slice"
+                                    ? "This segment will use the selected asset slice during assembly."
+                                    : "Draft segment appears here when Seedance finishes."}
                               </p>
                             </div>
                           )}
                         </div>
-
-                        <div className="min-w-0">
-                          <div className="flex flex-wrap items-center justify-between gap-2">
-                            <span className="text-xs font-medium text-slate-500">{shot.beat}</span>
-                            <div className="flex flex-wrap items-center gap-2">
-                              {segment?.time_range ? <span className="font-mono text-[11px] text-slate-400">{segment.time_range}</span> : null}
-                              {segment?.task_id ? <span className="break-all font-mono text-[11px] text-slate-400">{segment.task_id}</span> : null}
+                        <div className="min-w-0 space-y-3">
+                          <div className="grid gap-3 md:grid-cols-2">
+                            <div className="rounded-md border border-black/10 bg-[#f5f5f7] p-3">
+                              <p className="text-xs text-slate-500">Visual</p>
+                              <p className="mt-2 break-words text-sm leading-6 text-slate-700">{selectedShot.visual_description}</p>
+                            </div>
+                            <div className="rounded-md border border-black/10 bg-[#f5f5f7] p-3">
+                              <p className="text-xs text-slate-500">Voiceover</p>
+                              <p className="mt-2 break-words text-sm leading-6 text-slate-700">{selectedShot.voiceover}</p>
                             </div>
                           </div>
-                          <div className="mt-3 grid gap-4 lg:grid-cols-2">
-                            <p className="break-words text-sm leading-6 text-slate-700">{shot.visual_description}</p>
-                            <p className="break-words text-sm leading-6 text-slate-700">{shot.voiceover}</p>
-                          </div>
-
-                          <div className="mt-3 grid gap-3 lg:grid-cols-[92px_minmax(0,1fr)]">
-                            <label className="block text-xs text-slate-600">
-                              Seconds
-                              <input
-                                className={inputClass}
-                                defaultValue={shot.duration_seconds}
-                                max={12}
-                                min={4}
-                                type="number"
-                                onBlur={(event) => {
-                                  const nextValue = Number(event.target.value);
-                                  if (Number.isFinite(nextValue) && nextValue !== shot.duration_seconds) {
-                                    void saveShotPatch(shot.shot_id, { duration_seconds: nextValue });
-                                  }
-                                }}
-                              />
-                            </label>
-                            <label className="block text-xs text-slate-600">
-                              Replacement asset slice
-                              <select
-                                className={inputClass}
-                                value={shot.selected_asset_slice_id ?? ""}
-                                onChange={(event) => {
-                                  void saveShotPatch(shot.shot_id, { selected_asset_slice_id: event.target.value || null });
-                                }}
-                              >
-                                <option value="">Use AI draft segment</option>
-                                {availableSlices.map((slice) => (
-                                  <option key={slice.slice_id} value={slice.slice_id}>
-                                    {slice.label} / {slice.usable_for ?? "evidence"}
-                                  </option>
-                                ))}
-                              </select>
-                            </label>
-                          </div>
-
-                          <div className="mt-3 grid gap-3 lg:grid-cols-2">
-                            <label className="block text-xs text-slate-600">
-                              Subtitle
-                              <input
-                                className={inputClass}
-                                defaultValue={shot.subtitle}
-                                onBlur={(event) => {
-                                  if (event.target.value !== shot.subtitle) {
-                                    void saveShotCaption(shot.shot_id, event.target.value);
-                                  }
-                                }}
-                              />
-                            </label>
-                            <label className="block text-xs text-slate-600">
-                              Camera motion
-                              <input
-                                className={inputClass}
-                                defaultValue={shot.camera_motion}
-                                onBlur={(event) => {
-                                  if (event.target.value !== shot.camera_motion) {
-                                    void saveShotPatch(shot.shot_id, { camera_motion: event.target.value });
-                                  }
-                                }}
-                              />
-                            </label>
-                          </div>
-                          <label className="mt-3 block text-xs text-slate-600">
-                            Voiceover
-                            <textarea
-                              className={`${textareaClass} min-h-20`}
-                              defaultValue={shot.voiceover}
-                              onBlur={(event) => {
-                                if (event.target.value !== shot.voiceover) {
-                                  void saveShotPatch(shot.shot_id, { voiceover: event.target.value });
-                                }
-                              }}
-                            />
-                          </label>
-                          <label className="mt-3 block text-xs text-slate-600">
-                            Video prompt
-                            <textarea
-                              className={`${textareaClass} min-h-24`}
-                              defaultValue={shot.video_prompt}
-                              onBlur={(event) => {
-                                if (event.target.value !== shot.video_prompt) {
-                                  void saveShotPatch(shot.shot_id, { video_prompt: event.target.value });
-                                }
-                              }}
-                            />
-                          </label>
-                          <div className="mt-3 flex flex-wrap gap-2">
-                            <Button size="sm" variant="secondary" onClick={() => void regenerateClip(shot.shot_id)}>
-                              <RefreshCcw className="h-4 w-4" />
-                              Regenerate segment
-                            </Button>
-                            <Button size="sm" variant="outline" onClick={() => void regenerateShot(shot.shot_id)}>
-                              Regenerate copy
-                            </Button>
-                            <Button size="sm" variant="secondary" onClick={assembleVideo} disabled={!generationReadyForAssembly || assembling || assemblyActive}>
-                              {assembling ? <Loader2 className="h-4 w-4 animate-spin" /> : <Video className="h-4 w-4" />}
-                              {assemblyActive ? "Assembly running" : "Assemble draft"}
-                            </Button>
-                          </div>
-                          <div className="mt-3 flex flex-wrap gap-2">
-                            {(shot.linked_factor_keys ?? []).map((key) => (
+                          <div className="flex flex-wrap gap-2">
+                            {(selectedShot.linked_factor_keys ?? []).map((key) => (
                               <Badge key={key}>{key}</Badge>
                             ))}
                           </div>
                         </div>
                       </div>
                     </div>
-                  );
-                })}
+
+                    <form
+                      key={selectedShot.shot_id}
+                      className="rounded-lg border border-black/10 bg-white p-4"
+                      onSubmit={(event) => {
+                        event.preventDefault();
+                        const formData = new FormData(event.currentTarget);
+                        void saveShotPatch(selectedShot.shot_id, {
+                          beat: String(formData.get("beat") ?? ""),
+                          selected_asset_slice_id: String(formData.get("selected_asset_slice_id") ?? "") || null,
+                          subtitle: String(formData.get("subtitle") ?? ""),
+                          voiceover: String(formData.get("voiceover") ?? ""),
+                          camera_motion: String(formData.get("camera_motion") ?? ""),
+                          visual_description: String(formData.get("visual_description") ?? ""),
+                          image_prompt: String(formData.get("image_prompt") ?? ""),
+                          video_prompt: String(formData.get("video_prompt") ?? ""),
+                        });
+                      }}
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <p className="text-sm font-medium text-slate-950">Segment Inspector</p>
+                        <Button size="sm" type="submit">
+                          <CheckCircle2 className="h-4 w-4" />
+                          Save
+                        </Button>
+                      </div>
+                      <div className="mt-4 grid gap-3">
+                        <label className="block text-xs text-slate-600">
+                          Beat
+                          <input className={inputClass} defaultValue={selectedShot.beat} name="beat" />
+                        </label>
+                        <div className="grid gap-3 sm:grid-cols-[96px_minmax(0,1fr)]">
+                          <div className="block text-xs text-slate-600">
+                            Seconds
+                            <div className="mt-1 rounded-md border border-black/10 bg-[#f5f5f7] px-3 py-2 font-mono text-sm text-slate-700">
+                              {selectedShot.duration_seconds}s
+                            </div>
+                          </div>
+                          <label className="block text-xs text-slate-600">
+                            Source slice
+                            <select className={inputClass} defaultValue={selectedShot.selected_asset_slice_id ?? ""} name="selected_asset_slice_id">
+                              <option value="">Use draft or replacement</option>
+                              {availableSlices.map((slice) => (
+                                <option key={slice.slice_id} value={slice.slice_id}>
+                                  {slice.label} / {slice.usable_for ?? "evidence"}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                        </div>
+                        <label className="block text-xs text-slate-600">
+                          Subtitle
+                          <input className={inputClass} defaultValue={selectedShot.subtitle} name="subtitle" />
+                        </label>
+                        <label className="block text-xs text-slate-600">
+                          Voiceover
+                          <textarea className={`${textareaClass} min-h-20`} defaultValue={selectedShot.voiceover} name="voiceover" />
+                        </label>
+                        <label className="block text-xs text-slate-600">
+                          Camera motion
+                          <input className={inputClass} defaultValue={selectedShot.camera_motion} name="camera_motion" />
+                        </label>
+                        <label className="block text-xs text-slate-600">
+                          Lens / scene
+                          <textarea className={`${textareaClass} min-h-20`} defaultValue={selectedShot.visual_description} name="visual_description" />
+                        </label>
+                        <label className="block text-xs text-slate-600">
+                          Image prompt
+                          <textarea className={`${textareaClass} min-h-20`} defaultValue={selectedShot.image_prompt} name="image_prompt" />
+                        </label>
+                        <label className="block text-xs text-slate-600">
+                          Video prompt
+                          <textarea className={`${textareaClass} min-h-24`} defaultValue={selectedShot.video_prompt} name="video_prompt" />
+                        </label>
+                      </div>
+
+                      <div className="mt-4 grid grid-cols-2 gap-2">
+                        <Button size="sm" variant="outline" type="button" onClick={() => void regenerateShot(selectedShot.shot_id)} disabled={segmentAction === `copy:${selectedShot.shot_id}`}>
+                          {segmentAction === `copy:${selectedShot.shot_id}` ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+                          Regenerate copy
+                        </Button>
+                        <Button size="sm" variant="secondary" type="button" onClick={() => void regenerateClip(selectedShot.shot_id)} disabled={segmentAction === `clip:${selectedShot.shot_id}`}>
+                          {segmentAction === `clip:${selectedShot.shot_id}` ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCcw className="h-4 w-4" />}
+                          Regenerate segment
+                        </Button>
+                      </div>
+
+                      <div className="mt-4 rounded-md border border-black/10 bg-[#f5f5f7] p-3">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div>
+                            <p className="text-xs font-medium text-slate-700">Assemble / Export</p>
+                            <p className="mt-1 text-xs text-slate-500">{timelineTotalSeconds}s timeline{timelineIsStale ? " / stale" : ""}</p>
+                          </div>
+                          <Badge>{assemblyAspectRatio}</Badge>
+                        </div>
+                        <div className="mt-3 grid gap-2">
+                          <select className={inputClass} value={assemblyAspectRatio} onChange={(event) => setAssemblyAspectRatio(event.target.value as typeof assemblyAspectRatio)}>
+                            <option value="9:16">9:16</option>
+                            <option value="16:9">16:9</option>
+                            <option value="1:1">1:1</option>
+                          </select>
+                          <label className="flex items-center justify-between gap-3 text-xs text-slate-700">
+                            <span>Include timeline audio</span>
+                            <input type="checkbox" checked={includeBgm} onChange={(event) => setIncludeBgm(event.target.checked)} />
+                          </label>
+                          <Button size="sm" variant="secondary" type="button" onClick={assembleVideo} disabled={!generationReadyForAssembly || assembling || assemblyActive}>
+                            {assembling ? <Loader2 className="h-4 w-4 animate-spin" /> : <Video className="h-4 w-4" />}
+                            {assemblyActive ? "Assembly running" : "Assemble"}
+                          </Button>
+                        </div>
+                      </div>
+                    </form>
+                  </div>
+                ) : (
+                  <EmptyState text="No segment selected." />
+                )}
               </div>
             ) : (
               <EmptyState text="No storyboard yet." />
             )}
           </Card>
 
-          <Card>
-            <CardHeader>
-              <div>
-                <CardTitle>Media Artifacts</CardTitle>
-                <CardDescription>Image prompts, cover generation, and provider failures stay visibly separated.</CardDescription>
-              </div>
+          <details className="rounded-lg border border-black/10 bg-white p-4 shadow-sm shadow-black/[0.03]">
+            <summary className="flex cursor-pointer items-center justify-between gap-3 text-sm font-semibold text-slate-950">
+              Media Artifacts
               <ImageIcon className="h-5 w-5 text-cyan-700" />
-            </CardHeader>
+            </summary>
+            <p className="mt-1 text-xs leading-5 text-slate-500">Image prompts, cover generation, and provider failures stay separated.</p>
             <div className="grid gap-3 md:grid-cols-2">
               {imageArtifacts.map((artifact) => (
                 <div key={artifact.id} className="rounded-lg border border-black/10 bg-[#f5f5f7] p-4">
@@ -1383,12 +1518,12 @@ export default function StudioPage() {
               ))}
               {!imageArtifacts.length ? <EmptyState className="md:col-span-2" text="No media artifacts yet." /> : null}
             </div>
-          </Card>
+          </details>
         </main>
 
-        <aside className="grid gap-6 2xl:sticky 2xl:top-24 2xl:self-start">
-          <Card>
-            <CardHeader>
+        <aside className="grid gap-4 xl:sticky xl:top-32 xl:self-start">
+          <Card className="p-4">
+            <CardHeader className="mb-3">
               <div>
                 <CardTitle>Preview</CardTitle>
                 <CardDescription>{run?.preview.mode ?? "Provider preview appears after generation."}</CardDescription>
@@ -1475,9 +1610,9 @@ export default function StudioPage() {
                 </div>
                 <label className="mt-3 flex items-start justify-between gap-3 text-xs text-slate-600">
                   <span>
-                    Mix uploaded audio as BGM
+                    Include timeline audio
                     <span className="mt-1 block leading-5 text-slate-500">
-                      {hasUploadedAudio ? "An uploaded audio file will be looped quietly under the video." : "Upload an audio file to enable real BGM. TTS remains a placeholder."}
+                      {hasUploadedAudio ? "Uploaded audio is used first; otherwise the continuous draft audio is preserved." : "Use the continuous draft audio track when available. TTS remains a placeholder."}
                     </span>
                   </span>
                   <input type="checkbox" checked={includeBgm} onChange={(event) => setIncludeBgm(event.target.checked)} />
@@ -1499,7 +1634,7 @@ export default function StudioPage() {
                 Refresh preview
               </Button>
               <p className="text-xs leading-5 text-slate-500">
-                Local assembly exports MP4 with burned subtitles. Uploaded audio can be mixed as BGM; TTS voiceover is still a placeholder.
+                Local assembly exports MP4 with burned subtitles. It preserves draft audio by default, or uses uploaded audio when attached.
               </p>
               {run ? (
                 <div className="rounded-lg border border-black/10 bg-[#f5f5f7] p-3">
@@ -1512,9 +1647,11 @@ export default function StudioPage() {
                       : `Target ${String(run.script.duration_seconds ?? form.durationSeconds)}s. Video provider output is not available yet.`}
                   </p>
                   {assembledVideoArtifact?.payload.has_audio === true ? (
-                    <p className="mt-1 text-xs leading-5 text-slate-500">Uploaded BGM is mixed into this export. TTS voiceover is still a placeholder.</p>
+                    <p className="mt-1 text-xs leading-5 text-slate-500">
+                      {audioSourceLabel(assembledVideoArtifact.payload.audio_source)}. TTS voiceover is still a placeholder.
+                    </p>
                   ) : assembledVideoArtifact?.payload.has_audio === false ? (
-                    <p className="mt-1 text-xs leading-5 text-slate-500">No audio file was mixed. TTS voiceover is a placeholder; subtitles are burned into the picture.</p>
+                    <p className="mt-1 text-xs leading-5 text-slate-500">No usable audio track was found. TTS voiceover is a placeholder; subtitles are burned into the picture.</p>
                   ) : null}
                 </div>
               ) : null}
@@ -1536,14 +1673,12 @@ export default function StudioPage() {
             ) : null}
           </Card>
 
-          <Card>
-            <CardHeader>
-              <div>
-                <CardTitle>My Assets Used</CardTitle>
-                <CardDescription>{run ? `${run.assets.length} private assets attached to this run.` : "Uploaded files are attached only to this run."}</CardDescription>
-              </div>
+          <details className="rounded-lg border border-black/10 bg-white p-4 shadow-sm shadow-black/[0.03]">
+            <summary className="flex cursor-pointer items-center justify-between gap-3 text-sm font-semibold text-slate-950">
+              My Assets Used
               <FileUp className="h-5 w-5 text-blue-600" />
-            </CardHeader>
+            </summary>
+            <p className="mt-1 text-xs leading-5 text-slate-500">{run ? `${run.assets.length} private assets attached to this run.` : "Uploaded files are attached only to this run."}</p>
             <div className="space-y-3">
               {(run?.assets ?? []).map((asset) => (
                 <div key={asset.id} className="rounded-lg border border-black/10 bg-[#f5f5f7] p-3">
@@ -1556,16 +1691,14 @@ export default function StudioPage() {
               ))}
               {!run?.assets.length ? <EmptyState text="No private assets attached yet." /> : null}
             </div>
-          </Card>
+          </details>
 
-          <Card>
-            <CardHeader>
-              <div>
-                <CardTitle>Compliance</CardTitle>
-                <CardDescription>{run?.compliance.final_delivery ?? "Render & Review Agent will add checks."}</CardDescription>
-              </div>
+          <details className="rounded-lg border border-black/10 bg-white p-4 shadow-sm shadow-black/[0.03]">
+            <summary className="flex cursor-pointer items-center justify-between gap-3 text-sm font-semibold text-slate-950">
+              Compliance
               {run?.compliance.passed ? <CheckCircle2 className="h-5 w-5 text-emerald-600" /> : <ShieldCheck className="h-5 w-5 text-slate-500" />}
-            </CardHeader>
+            </summary>
+            <p className="mt-1 text-xs leading-5 text-slate-500">{run?.compliance.final_delivery ?? "Render & Review Agent will add checks."}</p>
             <div className="space-y-3">
               {(run?.compliance.checks ?? []).map((check) => (
                 <div key={check.name} className="rounded-lg border border-black/10 bg-[#f5f5f7] p-4">
@@ -1576,7 +1709,7 @@ export default function StudioPage() {
               ))}
               {!run ? <EmptyState text="No compliance report yet." /> : null}
             </div>
-          </Card>
+          </details>
         </aside>
       </section>
     </>

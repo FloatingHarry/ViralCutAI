@@ -1,253 +1,172 @@
 # ViralCutAI New Chat Handoff
 
-Last updated: 2026-06-03
+Updated: 2026-06-09
 
-This file is the clean handoff for opening a new Codex conversation in `D:\Desktop\viralcutai`. It intentionally ignores old reverted plans unless they matter as warnings.
+## Current Goal
 
-## 1. Current Baseline
+ViralCutAI is an ecommerce short-video AIGC workflow for:
 
-- Project root: `D:\Desktop\viralcutai`.
-- Frontend: Next.js App Router + React + TypeScript in `apps/web`.
-- Backend: FastAPI + Python in `apps/api`.
-- Workflow runtime: LangGraph Python in `apps/api/app/services/agent_workflows.py`.
-- Database: PostgreSQL via Docker Compose service `viralcutai-postgres`.
-- Current Docker service check: Postgres is healthy on port `5432`.
-- Current API check: `GET http://127.0.0.1:8000/health` returns `200`.
-- Current web check: `GET http://localhost:3000/studio` returns `200`.
-- Git status is not a normal clean tracked repo: most files show as `??` untracked. Do not assume `git restore` can recover previous versions.
+1. submitting private product assets,
+2. selecting or retrieving viral factors,
+3. generating a 12-second TikTok-style draft,
+4. editing/replacing segments,
+5. analyzing real performance metrics.
 
-Important baseline decision:
+This repo is local-only right now. Do not push to GitHub unless explicitly requested.
 
-- The user manually rolled back the problematic `Segment Regeneration and Global Draft Prompt Fix Plan`.
-- Do not re-apply that plan as-is.
-- Do not assume old conversation state is current truth. Inspect files and API before changing anything.
+## Privacy / Git Safety
 
-## 2. Provider Truth Rules
+Keep these out of Git:
 
-The user strongly prefers truthful provider behavior:
+- `.env`, `.env.local`, `.env.*`
+- `storage/`
+- `videos/`
+- `node_modules/`
+- `apps/web/.next/`
+- logs, caches, build output
 
-- If a provider is not configured, placeholder/mock is allowed only as "not connected".
-- If a real configured API is called and fails, do not generate fake replacement output.
-- Show failure clearly.
-- Do not mix real and fake data in a way that looks like a successful real result.
-- Never print or commit API keys from `.env.local`.
-- Do not paste signed Seedance/TOS video URLs into chat or docs; redact them.
+Current `.gitignore` covers the above. API keys belong only in local env files.
 
-Current `/health` provider status:
+## Services
 
-- `text_provider`: configured
-- `image_understanding_provider`: configured
-- `video_frame_understanding_provider`: configured
-- `image_plan_provider`: configured
-- `image_generation_provider`: missing_config
-- `video_provider`: configured
-- `experiment_provider`: configured
+Typical local services:
 
-Interpretation:
+- API: `http://127.0.0.1:8000`
+- Web: `http://localhost:3000`
+- Postgres: local Docker container used by the API
 
-- Volcengine text/multimodal endpoint is configured and used for strategy, script, image prompt planning, asset understanding, and experiment analysis.
-- Seedance video provider is configured.
-- Real image generation is not configured because `VOLCENGINE_IMAGE_MODEL` is empty/missing. Image prompt planning is still text-based and configured.
+Use `http://localhost:3000` for the web app in dev. Next dev can warn or break HMR when opened through `127.0.0.1:3000`.
 
-## 3. How To Run
+## Current Providers
 
-From `D:\Desktop\viralcutai`:
+Recent health check showed:
+
+- Volcengine text provider: configured
+- image understanding provider: configured
+- video frame understanding provider: configured
+- image plan provider: configured
+- Seedance video provider: configured
+- FastMoss provider: configured
+- image generation provider: missing config
+
+TTS/BGM/subtitle providers are still planning/mock outputs.
+
+## Important Implemented Areas
+
+### Asset Library
+
+- Asset library now treats assets as product asset collections, not isolated files.
+- Preset Aurora Glow Bottle collection exists with two product images and structured slices.
+- Assets and slices are used for Studio retrieval and prompt grounding.
+- User-facing asset UI was simplified toward: product name/details + images/videos + description.
+
+### Viral Library / FastMoss
+
+- FastMoss imports are backend/internal, not normal user UI.
+- FastMoss records start as structured-only viral candidates.
+- Owner can manually attach verified MP4 later; keyframes and visual verification then enrich the viral record.
+- Viral Library UI was compacted; video-verified entries have cover/detail display.
+- Template selection uses UID input rather than awkward scroll selection.
+
+### Studio Generation
+
+- Current generation is 12 seconds with fixed 3 segments:
+  - `shot-1` Hook, 4s
+  - `shot-2` Proof + Use, 4s
+  - `shot-3` CTA, 4s
+- Recent Aurora run used private asset retrieval correctly.
+- Auto viral reference matching was too loose and matched a cologne FastMoss reference for Aurora Glow Bottle. This has been fixed after that run: automatic reference now requires product-name core token matches, not only broad category matches.
+- Future Aurora runs should return no automatic viral reference unless a truly strong match exists.
+
+### Editor / Segment Editing
+
+- Editor has a total-video preview plus independent 4-second segment previews.
+- Backend route exists for segment clip preview:
+  - `GET /generation-runs/{run_id}/editor-clip-video?shot_id=shot-1&source_type=draft_segment`
+- Verified with ffprobe that the three latest draft segment previews are each exactly 4.0 seconds.
+- Editor supports timeline clips, remove range, append/replace sources, assemble/export.
+- Current UI is too complex and should be simplified into an "Editor Lite" default view.
+
+### Segment Regeneration
+
+- Single segment replacement uses Seedance replacement clip generation.
+- Latest attempted `shot-2` replacement failed because Seedance request hit:
+  - `[SSL: UNEXPECTED_EOF_WHILE_READING]`
+- This was a provider/network SSL EOF before a task id was returned, not a duration/schema issue.
+- Seedance create/poll now has retry handling for transient SSL/transport/429/5xx errors.
+- The failed old replacement artifact remains failed; retry the segment manually in the UI to use the new retry logic.
+
+### Analytics / Attribution
+
+- Analytics no longer has demo metric buttons.
+- It now shows validation reasons when the attribution button cannot run.
+- Results now include chart-style UI:
+  - overall score,
+  - watch completion,
+  - CTR,
+  - revenue per 1k views,
+  - factor impact ranking.
+- Volcengine experiment JSON failures no longer fail the whole experiment. If provider narrative JSON is malformed, backend falls back to deterministic local attribution using user-entered real metrics.
+
+## Latest Known Run Notes
+
+Latest inspected run:
+
+- `0bf4c0bf-08af-460c-8be2-9510179e3810`
+- status: `succeeded`
+- product: Aurora Glow Bottle
+- asset retrieval: used Aurora asset collection and slices
+- viral factors: 8 factor board entries
+- old auto reference: cologne FastMoss reference was incorrectly included before the matcher fix
+- `shot-2` replacement clip: failed from Seedance SSL EOF
+- draft segment previews: each verified as 4 seconds
+
+Because matching was fixed after this run, create a fresh run to verify the new no-hard-match behavior.
+
+## Current UX Concerns / Next Work
+
+Recommended next changes:
+
+1. Simplify Editor default UI.
+   - Show total video on top/left.
+   - Show three 4-second segment cards.
+   - Right inspector only: regenerate this segment, replace with asset, edit copy, assemble.
+   - Move remove-range, append clip, source-type controls into Advanced.
+
+2. Simplify Studio input.
+   - Keep product name and asset collection.
+   - Merge selling points, audience, material notes, creative goal, visual style into one "Campaign brief" textarea.
+   - Frontend can still map the brief into existing backend fields, so schema does not need a big migration.
+
+3. Re-run a fresh Aurora generation.
+   - Confirm no unrelated cologne reference is selected.
+   - Confirm private assets remain in prompt/source assets.
+
+4. Retry single-segment regeneration.
+   - Confirm new Seedance retry logic handles transient SSL/network failures.
+   - If provider fails again, inspect artifact payload failure_reason.
+
+5. Keep TTS/BGM as future work.
+   - Current exported videos may use draft audio or mock planning depending on assembly path.
+
+## Verification Recently Run
+
+Commands recently passed:
 
 ```powershell
-docker compose up -d postgres
-python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000 --app-dir apps/api
-D:\tools\npm-global\pnpm.cmd dev:web
+python -m compileall apps/api/app
+pnpm --dir apps/web lint
+pnpm --dir apps/web build
 ```
 
-Open:
+Editor clip preview check:
 
-- Studio: `http://localhost:3000/studio`
-- API health: `http://127.0.0.1:8000/health`
+- `shot-1`: 4.0s
+- `shot-2`: 4.0s
+- `shot-3`: 4.0s
 
-Useful checks:
+## Do Not Forget
 
-```powershell
-python -m compileall apps\api\app
-D:\tools\npm-global\pnpm.cmd --dir apps/web lint
-D:\tools\npm-global\pnpm.cmd --dir apps/web build
-```
-
-## 4. Main Backend APIs
-
-Core health:
-
-- `GET /health`
-
-My Assets / private asset library:
-
-- `POST /asset-collections`
-- `GET /asset-collections`
-- `GET /asset-collections/{id}`
-- `PATCH /asset-collections/{id}`
-- `POST /asset-collections/{id}/assets`
-- `POST /assets`
-- `GET /assets`
-- `GET /assets/search`
-- `GET /assets/{id}`
-- `GET /assets/{id}/file`
-- `PATCH /assets/{id}`
-- `POST /assets/{id}/analyze`
-- `PATCH /asset-slices/{id}`
-
-Viral Library / external playbook:
-
-- `GET /viral-videos`
-- `POST /viral-videos/analyze`
-- `GET /viral-factors`
-- `GET /creative-templates`
-- `POST /creative-templates/build`
-
-Generation:
-
-- `POST /generation-runs`
-- `GET /generation-runs`
-- `GET /generation-runs/{run_id}`
-- `GET /generation-runs/{run_id}/export`
-- `POST /generation-runs/{run_id}/retry`
-- `PATCH /generation-runs/{run_id}/storyboard/{shot_id}`
-- `POST /generation-runs/{run_id}/storyboard/{shot_id}/regenerate`
-- `POST /generation-runs/{run_id}/storyboard/{shot_id}/regenerate-clip`
-- `POST /generation-runs/{run_id}/render-preview`
-- `POST /generation-runs/{run_id}/assemble-preview`
-- `GET /generation-runs/{run_id}/assembled-video`
-
-Analytics:
-
-- `POST /experiments/analyze`
-- `GET /experiments`
-- `GET /experiments/{id}`
-
-## 5. Current Frontend Pages
-
-Navigation in `apps/web/src/components/app-shell.tsx`:
-
-- `/studio` - Agent Studio main generation UI.
-- `/assets` - My Assets private asset collection UI.
-- `/viral-library` - external viral playbook/reference/factor/template UI.
-- `/agent` - Trace Console for generation and experiment traces.
-- `/analytics` - A/B Experiment Lab using real manually entered metrics.
-
-There is still an `apps/web/src/app/script-lab` folder, but the active navigation does not list Script Lab.
-
-## 6. Current Data Snapshot
-
-Current database snapshot from local API:
-
-- Asset collections: `0`
-- Assets: `0`
-- Viral videos: `0`
-- Viral factors: `0`
-- Creative templates: `0`
-- Experiments: `0`
-- Generation runs: at least `5`
-
-Latest runs:
-
-- `3979fdc6-7a8d-4381-b606-f86872178bb6`: `succeeded`
-- `85466c30-fcc4-4ea2-a870-a754131c405d`: `failed`
-- `34e07214-be52-4d3f-9cc4-07152b11d5ac`: `failed`
-- `4e8476be-132e-4688-968d-2f4385cc3e78`: `failed`
-- `e6f104b1-bd4e-4a0b-9364-c9f35589f9b3`: `succeeded`
-
-Known failure cause:
-
-- Recent failed run `34e07214...` failed in `Script & Storyboard Agent`, substep `prompt_package`.
-- `copy_draft` succeeded with Volcengine.
-- `storyboard_plan` succeeded with Volcengine.
-- `prompt_package` returned malformed JSON: `Expecting ',' delimiter`.
-- JSON repair did not recover it, and because real provider failures should not be mocked, the run failed.
-
-This means failures can be caused by occasional LLM structured JSON instability, not necessarily Seedance or LangGraph itself.
-
-## 7. Current Architecture Notes
-
-Generation flow:
-
-- Main generation is through `GenerationRun`.
-- LangGraph has three external generation Agents:
-  - `Viral Strategy Agent`
-  - `Script & Storyboard Agent`
-  - `Render & Review Agent`
-- There is also an experiment graph with `Attribution & Experiment Agent`.
-- The generation graph has internal provider substeps, including strategy brief, factor packaging, copy draft, storyboard plan, prompt package, render/review media artifacts.
-
-Video behavior:
-
-- Studio duration defaults to `12s`.
-- Seedance 1.5 is treated as supporting `4-12s` in this app.
-- Current preferred creative interpretation: Generate one AI video draft, then later refine/edit. Be careful: previous experiments around "three independent clips" caused confusion.
-
-Asset behavior:
-
-- My Assets is the private user asset library.
-- Viral Library is the external public playbook/methodology library.
-- Private user assets and Studio outputs should not automatically enter Viral Library.
-
-Analytics behavior:
-
-- Analytics should not use simulated experiment tables.
-- It should compare 2-4 succeeded generation runs.
-- User must manually enter real metrics before running Attribution Agent.
-
-## 8. Known Pain Points / Do Not Repeat
-
-Do not reintroduce the old `Segment Regeneration and Global Draft Prompt Fix Plan` as one large patch.
-
-Why it was rejected:
-
-- It mixed several concerns: segment status, global prompt UI, backend state machine, replacement clip failure semantics.
-- The user could not tell what changed or why.
-- It made debugging harder.
-
-If segment regeneration is revisited, do it in smaller steps:
-
-1. Observe and display current segment/replacement state without changing backend semantics.
-2. Add explicit UI feedback after clicking `Regenerate segment`.
-3. Only then adjust backend state, with a separate narrow patch.
-
-Do not silently convert real provider failures into mock outputs.
-
-Do not change `prompt_package` into local packaging unless the user explicitly approves it. The user paused that idea because they wanted to understand why the failure occurred first.
-
-## 9. Recommended Next Steps
-
-Recommended first step in a new chat:
-
-1. Read this file.
-2. Inspect current code/API briefly.
-3. Create a safe baseline before further code changes, because the repo is largely untracked.
-
-Recommended next product work:
-
-- First stabilize baseline and version control.
-- Then improve observability around structured LLM failures:
-  - show which Agent substep failed,
-  - show provider message,
-  - show retry guidance,
-  - avoid exposing raw secrets or signed URLs.
-- Then decide how to make `prompt_package` more stable:
-  - Option A: keep it as LLM JSON, but split per shot and add stronger repair/retry.
-  - Option B: make it local deterministic packaging from the already real script/storyboard.
-  - Option C: run LLM prompt polish as optional enhancement after a successful base draft.
-
-Recommended feature direction after stability:
-
-- My Assets: add real sample/upload flow and test image/video multimodal understanding.
-- Viral Library: later connect FastMoss/Kalodata API after user obtains access.
-- Creation module: clarify editing model before deep implementation. The likely desired meaning is: generate an AI draft video first, then provide a workbench to refine/replace segments and assemble final MP4.
-
-## 10. Instructions For The Next Assistant
-
-- Do not trust memory from the old conversation.
-- Treat this file plus live repo/API inspection as source of truth.
-- Do not mutate files before explaining the exact narrow change.
-- Use `rg` for search.
-- Use `apply_patch` for edits.
-- Avoid printing `.env.local` or any secret values.
-- Redact provider video URLs and signed URLs.
-- Before doing large feature work, strongly recommend creating a Git baseline or backup.
+- Do not commit or upload local videos.
+- Do not expose FastMoss, Volcengine, or Seedance keys.
+- Keep commits local unless the user explicitly asks to push.

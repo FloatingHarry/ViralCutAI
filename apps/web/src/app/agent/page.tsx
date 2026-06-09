@@ -393,8 +393,8 @@ export default function AgentPage() {
                   </div>
                   <p className="mt-2 text-xs leading-5 text-slate-500">{experiment.summary}</p>
                   <div className="mt-3 grid gap-3">
-                    {experiment.trace.map((step) => (
-                      <pre key={`${experiment.experiment_id}-${step.agent_name}`} className="max-h-48 max-w-full overflow-auto whitespace-pre-wrap break-words rounded-md bg-slate-950 p-3 text-xs leading-5 text-slate-100">
+                    {experiment.trace.map((step, index) => (
+                      <pre key={`${experiment.experiment_id}-${step.agent_name}-${index}`} className="max-h-48 max-w-full overflow-auto whitespace-pre-wrap break-words rounded-md bg-slate-950 p-3 text-xs leading-5 text-slate-100">
                         {displayJson(step)}
                       </pre>
                     ))}

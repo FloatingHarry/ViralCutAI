@@ -12,4 +12,5 @@ node_modules/
 dist/
 build/
 storage/
+videos/
 *.log

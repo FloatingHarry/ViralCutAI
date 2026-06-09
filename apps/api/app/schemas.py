@@ -16,7 +16,7 @@ class GenerationRunCreate(BaseModel):
     creative_goal: str = Field(default="Generate a conversion-oriented commerce video", max_length=800)
     reference_style: str = Field(default="fast native short-video product demo", max_length=400)
     visual_style: str = Field(default="clean studio, bright product close-ups", max_length=400)
-    duration_seconds: int = Field(default=12, ge=4, le=12)
+    duration_seconds: int = Field(default=12, ge=12, le=12)
     platform: str = Field(default="TikTok Shop", max_length=120)
     source_assets: list[dict] = Field(default_factory=list)
     asset_ids: list[UUID] = Field(default_factory=list)
@@ -168,6 +168,41 @@ class ViralVideoAnalyzeCreate(BaseModel):
     source_statement: str = Field(default="User submitted reference for structured analysis.", max_length=800)
 
 
+class FastMossVideoImportCreate(BaseModel):
+    keywords: str = Field(min_length=1, max_length=240)
+    region: str = Field(default="US", max_length=20)
+    product_category_id: int | None = Field(default=None, ge=1)
+    creator_category_id: int | None = Field(default=None, ge=1)
+    order_by: str = Field(default="play_count desc", max_length=80)
+    pagesize: int = Field(default=10, ge=1, le=20)
+    page: int = Field(default=1, ge=1)
+
+
+class FastMossImportItemRead(BaseModel):
+    status: str
+    video_id: str
+    title: str = ""
+    source_url: str = ""
+    reference_id: UUID | None = None
+    factor_count: int = 0
+    message: str = ""
+    metrics: dict = Field(default_factory=dict)
+
+
+class FastMossVideoImportRead(BaseModel):
+    status: str
+    summary: str
+    provider_status: str
+    provider_message: str
+    request: dict
+    imported_count: int
+    skipped_count: int
+    failed_count: int
+    factor_count: int
+    items: list[FastMossImportItemRead] = Field(default_factory=list)
+    raw_total: int | None = None
+
+
 class CreativeTemplateBuildCreate(BaseModel):
     name: str = Field(default="", max_length=180)
     category: str = Field(default="", max_length=120)
@@ -185,6 +220,7 @@ class ViralVideoAnalysisRead(BaseModel):
     source_statement: str
     analysis: dict
     created_at: datetime
+    updated_at: datetime
 
 
 class ViralFactorRead(BaseModel):
@@ -303,18 +339,54 @@ class GenerationRunRead(BaseModel):
 class StoryboardPatch(BaseModel):
     order_index: int | None = Field(default=None, ge=1, le=3)
     duration_seconds: int | None = Field(default=None, ge=1, le=12)
+    beat: str | None = Field(default=None, max_length=160)
     visual_description: str | None = Field(default=None, max_length=1200)
     camera_motion: str | None = Field(default=None, max_length=400)
     voiceover: str | None = Field(default=None, max_length=1200)
     subtitle: str | None = Field(default=None, max_length=400)
+    tts_line: str | None = Field(default=None, max_length=1200)
+    bgm_cue: str | None = Field(default=None, max_length=300)
     image_prompt: str | None = Field(default=None, max_length=1600)
     video_prompt: str | None = Field(default=None, max_length=1600)
+    selected_asset_slice_id: UUID | None = None
+
+
+class StoryboardCreate(BaseModel):
+    order_index: int | None = Field(default=None, ge=1, le=3)
+    duration_seconds: int = Field(default=3, ge=1, le=12)
+    beat: str = Field(default="New beat", max_length=160)
+    visual_description: str = Field(default="", max_length=1200)
+    camera_motion: str = Field(default="", max_length=400)
+    voiceover: str = Field(default="", max_length=1200)
+    subtitle: str = Field(default="", max_length=400)
+    tts_line: str = Field(default="", max_length=1200)
+    bgm_cue: str = Field(default="", max_length=300)
+    image_prompt: str = Field(default="", max_length=1600)
+    video_prompt: str = Field(default="", max_length=1600)
     selected_asset_slice_id: UUID | None = None
 
 
 class AssemblyPreviewCreate(BaseModel):
     aspect_ratio: str = Field(default="9:16", pattern="^(9:16|16:9|1:1)$")
     include_bgm: bool = True
+
+
+class EditorTimelineClip(BaseModel):
+    clip_id: str | None = Field(default=None, max_length=80)
+    source_type: str = Field(pattern="^(draft_segment|replacement_clip|asset_slice)$")
+    shot_id: str | None = Field(default=None, max_length=80)
+    asset_slice_id: UUID | None = None
+    label: str = Field(default="", max_length=240)
+    subtitle: str = Field(default="", max_length=400)
+    voiceover: str = Field(default="", max_length=1200)
+    source_start_seconds: int = Field(default=0, ge=0, le=3600)
+    source_end_seconds: int | None = Field(default=None, ge=1, le=3600)
+    duration_seconds: int = Field(default=4, ge=1, le=30)
+    enabled: bool = True
+
+
+class EditorTimelineUpdate(BaseModel):
+    clips: list[EditorTimelineClip] = Field(min_length=1, max_length=12)
 
 
 class ExperimentVariantMetricCreate(BaseModel):

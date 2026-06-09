@@ -210,6 +210,10 @@ def _preset_root() -> Path:
     return Path(get_settings().upload_dir).parent / "preset-assets"
 
 
+def _bundled_preset_root() -> Path:
+    return Path(__file__).resolve().parents[1] / "static" / "preset-assets"
+
+
 def _pseudo_embedding(*values: str) -> list[float]:
     digest = hashlib.sha256("|".join(values).encode("utf-8")).digest()
     return [round((byte / 255) * 2 - 1, 4) for byte in digest[:12]]
@@ -220,7 +224,7 @@ def _preset_asset_specs() -> list[dict[str, Any]]:
         {
             "filename": "aurora-glow-bottle-front.png",
             "source_candidates": [
-                "D:/Desktop/61da9cb3-bb9f-4028-8e31-bb6831f32fb3.png",
+                str(_bundled_preset_root() / "aurora-glow-bottle-front.png"),
                 str(_preset_root() / "aurora-glow-bottle-front.png"),
             ],
             "description": "Front hero product image for Aurora Glow Bottle with centered label, iridescent pastel body, polished cap, and clean reflective surface.",
@@ -238,7 +242,7 @@ def _preset_asset_specs() -> list[dict[str, Any]]:
         {
             "filename": "aurora-glow-bottle-angle.png",
             "source_candidates": [
-                "D:/Desktop/d4aa0656-5752-4237-8c8f-99eadca4bd22.png",
+                str(_bundled_preset_root() / "aurora-glow-bottle-angle.png"),
                 str(_preset_root() / "aurora-glow-bottle-angle.png"),
             ],
             "description": "Angled product image for Aurora Glow Bottle showing dimensional bottle shape, iridescent color shift, cap shine, and reflective shelf appeal.",

@@ -6,7 +6,8 @@
     "dev:web": "pnpm --dir apps/web dev",
     "build:web": "pnpm --dir apps/web build",
     "lint:web": "pnpm --dir apps/web lint",
-    "dev:api": "python -m uvicorn app.main:app --reload --app-dir apps/api"
+    "dev:api": "python -m uvicorn app.main:app --reload --app-dir apps/api",
+    "verify": "python -m compileall apps/api/app && pnpm --dir apps/web lint && pnpm --dir apps/web build"
   },
   "packageManager": "pnpm@11.4.0"
 }

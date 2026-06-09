@@ -255,7 +255,7 @@ def _compact_request_for_llm(request: dict[str, Any]) -> dict[str, Any]:
             }
             for asset in (request.get("source_assets") or [])[:4]
         ],
-        "asset_collection": request.get("asset_collection"),
+        "asset_collection": _compact_asset_collection_for_llm(request.get("asset_collection")),
         "asset_library": [
             {
                 "filename": asset.get("filename"),
@@ -265,8 +265,8 @@ def _compact_request_for_llm(request: dict[str, Any]) -> dict[str, Any]:
             for asset in (request.get("asset_library") or [])[:4]
         ],
         "retrieval_context": _compact_retrieval_context(request.get("retrieval_context") or {}),
-        "reference_video": request.get("reference_video"),
-        "creative_template": request.get("creative_template"),
+        "reference_video": _compact_reference_for_llm(request.get("reference_video")),
+        "creative_template": _compact_template_for_llm(request.get("creative_template")),
         "selected_factors": [
             {
                 "name": factor.get("name"),
@@ -282,7 +282,7 @@ def _compact_retrieval_context(retrieval: dict[str, Any]) -> dict[str, Any]:
     return {
         "asset_query": retrieval.get("asset_query"),
         "evidence_summary": retrieval.get("evidence_summary"),
-        "selected_collection": retrieval.get("selected_collection"),
+        "selected_collection": _compact_asset_collection_for_llm(retrieval.get("selected_collection")),
         "methodology_summary": retrieval.get("methodology_summary"),
         "reference_match_mode": retrieval.get("reference_match_mode"),
         "reference_match_reason": retrieval.get("reference_match_reason"),
@@ -329,6 +329,123 @@ def _compact_retrieval_context(retrieval: dict[str, Any]) -> dict[str, Any]:
             {"name": item.get("name"), "strategy": str(item.get("strategy", ""))[:160]}
             for item in retrieval.get("auto_templates", [])[:3]
         ],
+    }
+
+
+def _compact_storyboard_request_for_llm(request: dict[str, Any]) -> dict[str, Any]:
+    retrieval = request.get("retrieval_context") if isinstance(request.get("retrieval_context"), dict) else {}
+    return {
+        "generation_mode": request.get("generation_mode"),
+        "product_name": request.get("product_name"),
+        "category": request.get("category"),
+        "selling_points": (request.get("selling_points") or [])[:5],
+        "target_audience": request.get("target_audience"),
+        "price_offer": request.get("price_offer"),
+        "material_notes": request.get("material_notes"),
+        "visual_style": request.get("visual_style"),
+        "duration_seconds": request.get("duration_seconds"),
+        "platform": request.get("platform"),
+        "source_assets": [
+            {
+                "filename": asset.get("filename"),
+                "asset_kind": asset.get("asset_kind"),
+                "summary": str(asset.get("summary") or asset.get("description") or "")[:180],
+            }
+            for asset in (request.get("source_assets") or [])[:3]
+            if isinstance(asset, dict)
+        ],
+        "asset_evidence": _storyboard_asset_evidence(request, retrieval),
+        "reference_match_mode": retrieval.get("reference_match_mode"),
+        "reference_match_reason": retrieval.get("reference_match_reason"),
+        "template": _compact_template_for_llm(retrieval.get("selected_template") or request.get("creative_template")),
+    }
+
+
+def _storyboard_asset_evidence(request: dict[str, Any], retrieval: dict[str, Any]) -> list[dict[str, Any]]:
+    evidence: list[dict[str, Any]] = []
+    for item in (retrieval.get("auto_asset_results") or [])[:4]:
+        if not isinstance(item, dict):
+            continue
+        for slice_item in (item.get("matched_slices") or [])[:2]:
+            if not isinstance(slice_item, dict):
+                continue
+            evidence.append(
+                {
+                    "filename": item.get("filename"),
+                    "usable_for": slice_item.get("usable_for"),
+                    "summary": str(slice_item.get("summary") or "")[:140],
+                    "score": item.get("score"),
+                }
+            )
+    if evidence:
+        return evidence[:8]
+
+    collection = request.get("asset_collection") if isinstance(request.get("asset_collection"), dict) else {}
+    for asset in (collection.get("assets") or [])[:3]:
+        if not isinstance(asset, dict):
+            continue
+        for slice_item in (asset.get("slices") or [])[:3]:
+            if isinstance(slice_item, dict):
+                evidence.append(
+                    {
+                        "filename": asset.get("filename"),
+                        "usable_for": slice_item.get("usable_for"),
+                        "summary": str(slice_item.get("summary") or "")[:140],
+                    }
+                )
+    return evidence[:8]
+
+
+def _compact_asset_collection_for_llm(collection: Any) -> dict[str, Any] | None:
+    if not isinstance(collection, dict):
+        return None
+    return {
+        "collection_id": collection.get("collection_id"),
+        "product_name": collection.get("product_name"),
+        "category": collection.get("category"),
+        "summary": str(collection.get("summary") or "")[:240],
+        "description": str(collection.get("description") or "")[:240],
+        "usage_notes": str(collection.get("usage_notes") or "")[:240],
+        "coverage": collection.get("coverage"),
+        "tags": (collection.get("tags") or [])[:12],
+        "assets": [_compact_collection_asset_for_llm(asset) for asset in (collection.get("assets") or [])[:3] if isinstance(asset, dict)],
+    }
+
+
+def _compact_collection_asset_for_llm(asset: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "filename": asset.get("filename"),
+        "asset_kind": asset.get("asset_kind"),
+        "summary": str(asset.get("summary") or asset.get("description") or "")[:180],
+        "tags": (asset.get("tags") or [])[:8],
+        "slices": [_compact_asset_slice_for_llm(item) for item in (asset.get("slices") or [])[:3] if isinstance(item, dict)],
+    }
+
+
+def _compact_asset_slice_for_llm(slice_item: dict[str, Any]) -> dict[str, Any]:
+    features = slice_item.get("features") if isinstance(slice_item.get("features"), dict) else {}
+    return {
+        "summary": str(slice_item.get("summary") or "")[:140],
+        "usable_for": slice_item.get("usable_for"),
+        "is_pinned": slice_item.get("is_pinned"),
+        "features": {
+            "detail": features.get("detail"),
+            "colors": (features.get("colors") or [])[:4],
+            "materials": (features.get("materials") or [])[:3],
+        },
+    }
+
+
+def _compact_template_for_llm(template: Any) -> dict[str, Any] | None:
+    if not isinstance(template, dict):
+        return None
+    return {
+        "id": template.get("id"),
+        "name": template.get("name"),
+        "category": template.get("category"),
+        "strategy": str(template.get("strategy") or "")[:180],
+        "factor_keys": (template.get("factor_keys") or [])[:8],
+        "structure": template.get("structure"),
     }
 
 
@@ -1016,7 +1133,9 @@ class VolcengineLLMProvider:
                     "content": (
                         f"Task: {task}\n"
                         f"Parse error: {_safe_error(parse_error)}\n"
+                        f"Expected schema: {self._repair_schema_hint(task)}\n"
                         "Fix the JSON while preserving the original fields and English content. "
+                        "If a required key name is visibly missing, restore the required key from the schema. "
                         "Do not add private data.\n\n"
                         f"BROKEN JSON/TEXT:\n{broken_content[:12000]}"
                     ),
@@ -1040,6 +1159,22 @@ class VolcengineLLMProvider:
         content = response.json()["choices"][0]["message"]["content"]
         self.last_raw_excerpt = _response_excerpt(content)
         return _extract_json_object(content)
+
+    def _repair_schema_hint(self, task: str) -> str:
+        if task == "storyboard_plan":
+            return (
+                '{"storyboard":[{"shot_id":"shot-1","order_index":1,"duration_seconds":4,'
+                '"beat":"Hook","visual_description":"","camera_motion":"","voiceover":"",'
+                '"subtitle":"","linked_factor_keys":[""]}]} with exactly 3 shots: shot-1, shot-2, shot-3.'
+            )
+        if task == "prompt_package":
+            return '{"storyboard_prompts":[{"shot_id":"shot-1","image_prompt":"","video_prompt":"","bgm_cue":""}]}'
+        if task == "copy_draft":
+            return (
+                '{"title":"","narrative":"","voiceover_lines":[""],"subtitle_lines":[""],"tts_lines":[""],'
+                '"bgm_plan":"","duration_seconds":12,"visual_style":"","source_asset_summary":""}'
+            )
+        return "one valid JSON object matching the task instructions"
 
     def _prompt(self, task: str, payload: dict[str, Any]) -> str:
         if task in {"viral_strategy", "strategy_brief"}:
@@ -1095,7 +1230,7 @@ class VolcengineLLMProvider:
             )
         if task == "copy_draft":
             compact_payload = {
-                "request": _compact_request_for_llm(payload.get("request", {})),
+                "request": _compact_storyboard_request_for_llm(payload.get("request", {})),
                 "strategy": _compact_strategy_for_llm(payload.get("strategy", {})),
             }
             return (
@@ -1104,6 +1239,7 @@ class VolcengineLLMProvider:
                 "Hard limits: title <= 60 chars, narrative <= 120 chars, visual_style <= 100 chars, source_asset_summary <= 90 chars, bgm_plan <= 90 chars. "
                 "voiceover_lines, subtitle_lines, and tts_lines must each contain exactly 3 strings for Hook, Proof + Use, CTA. "
                 "Each voiceover/TTS line <= 90 chars. Each subtitle <= 70 chars. duration_seconds must equal request duration. "
+                "No repeated adjective chains. No prose outside JSON. "
                 "Use this shape exactly: {\"title\":\"\",\"narrative\":\"\",\"voiceover_lines\":[\"\",\"\",\"\"],"
                 "\"subtitle_lines\":[\"\",\"\",\"\"],\"tts_lines\":[\"\",\"\",\"\"],\"bgm_plan\":\"\","
                 "\"duration_seconds\":12,\"visual_style\":\"\",\"source_asset_summary\":\"\"}.\n\n"
@@ -1111,7 +1247,7 @@ class VolcengineLLMProvider:
             )
         if task == "storyboard_plan":
             compact_payload = {
-                "request": _compact_request_for_llm(payload.get("request", {})),
+                "request": _compact_storyboard_request_for_llm(payload.get("request", {})),
                 "strategy": _compact_strategy_for_llm(payload.get("strategy", {})),
                 "script": {
                     "title": payload.get("script", {}).get("title"),

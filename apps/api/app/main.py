@@ -51,6 +51,7 @@ from app.services.asset_library import (
     update_asset_slice,
     update_collection,
 )
+from app.services.demo_seed import seed_public_demo_data
 from app.services.preset_seed import seed_preset_workspace
 from app.services.experiments import create_experiment_analysis, get_experiment, list_experiments
 from app.services.ffmpeg_assembly import AssemblyError, assembled_video_path, editor_clip_video_path, execute_assembly_preview_task, queue_assembly_preview
@@ -127,6 +128,11 @@ def health() -> dict[str, Any]:
 @app.post("/preset-assets/seed")
 def seed_preset_assets(db: Session = Depends(get_db)):
     return seed_preset_workspace(db)
+
+
+@app.post("/demo-data/seed")
+def seed_demo_data(db: Session = Depends(get_db)):
+    return seed_public_demo_data(db)
 
 
 @app.post("/asset-collections", response_model=AssetCollectionRead)

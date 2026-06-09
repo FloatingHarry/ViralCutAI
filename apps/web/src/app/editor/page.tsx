@@ -112,6 +112,7 @@ export default function EditorPage() {
     () => timelineSegments.find((segment) => segment.shot_id === selectedClip?.shot_id) ?? null,
     [selectedClip, timelineSegments],
   );
+  const selectedSegment = selectedClipSegment ?? timelineSegments[0] ?? null;
   const sliceOptions = useMemo<SliceOption[]>(
     () =>
       assets
@@ -135,6 +136,8 @@ export default function EditorPage() {
       ? assembledVideoUrl(run.run_id, assemblyAspectRatio)
       : null;
   const mainVideoUrl = assembledUrl ?? run?.preview.video_url ?? run?.preview.draft_video_url ?? "";
+  const selectedSegmentPreviewUrl = selectedSegment ? segmentVideoUrl(selectedSegment) : "";
+  const primaryPreviewUrl = mainVideoUrl || selectedSegmentPreviewUrl;
   const totalSeconds = clips.reduce((total, clip) => total + Math.max(1, Number(clip.duration_seconds || 1)), 0);
   const selectedSourceMax = selectedClip ? clipSourceMax(selectedClip, selectedClipSegment, selectedSliceOption) : 12;
   const assemblyActive = run?.preview.assembly_status === "queued" || run?.preview.assembly_status === "running";
@@ -202,6 +205,17 @@ export default function EditorPage() {
     });
     setSelectedClipId((current) => current || replacement.clip_id);
     setMessage(`${segment.beat ?? segment.shot_id} will use the ${sourceTypeLabel(sourceType).toLowerCase()} source. Save to apply.`);
+  }
+
+  function selectSegment(segment: TimelineSegment) {
+    const clip = clips.find((item) => item.shot_id === segment.shot_id && item.source_type !== "asset_slice") ?? clips.find((item) => item.shot_id === segment.shot_id);
+    if (clip) {
+      setSelectedClipId(clip.clip_id);
+      return;
+    }
+    const nextClip = clipFromSegment(segment, segment.source === "replacement_clip" ? "replacement_clip" : "draft_segment");
+    setClips((current) => recalculateClips([...current, nextClip]));
+    setSelectedClipId(nextClip.clip_id);
   }
 
   function appendAssetSlice(sliceId: string) {
@@ -373,7 +387,9 @@ export default function EditorPage() {
       setRun(nextRun);
       setTimeline(nextTimeline);
       setClips(recalculateClips(nextTimeline.clips));
-      setMessage(`Regeneration queued for ${selectedClip.shot_id}.`);
+      setMessage(`Regeneration queued for ${selectedClip.shot_id}. The segment card will update from generating to ready.`);
+      window.setTimeout(() => void loadRun(run.run_id, { quiet: true }), 2500);
+      window.setTimeout(() => void loadRun(run.run_id, { quiet: true }), 7000);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Segment regeneration failed");
     } finally {
@@ -402,7 +418,7 @@ export default function EditorPage() {
         badges={["Editor Timeline V2", "Drag reorder", "Synced audio assembly"]}
       />
 
-      <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">
+      <div className="grid gap-6">
         <main className="grid gap-6">
           <Card>
             <CardHeader>
@@ -430,6 +446,130 @@ export default function EditorPage() {
           </Card>
 
           <Card className="p-4">
+            <CardHeader className="mb-3">
+              <div>
+                <CardTitle>Editor Lite</CardTitle>
+                <CardDescription>Pick one of the three shots, inspect the prompt, regenerate it, then assemble the current cut.</CardDescription>
+              </div>
+              <Scissors className="h-5 w-5 text-blue-700" />
+            </CardHeader>
+            <div className="grid gap-4 xl:grid-cols-[minmax(240px,0.8fr)_minmax(280px,1fr)_minmax(280px,0.9fr)] 2xl:grid-cols-[minmax(300px,0.85fr)_minmax(360px,1fr)_minmax(340px,0.9fr)]">
+              <div className="grid content-start gap-3 rounded-lg border border-black/10 bg-[#f5f5f7] p-4">
+                <div>
+                  <p className="text-sm font-semibold text-slate-950">Current preview</p>
+                  <p className="mt-1 text-xs leading-5 text-slate-500">{assembledUrl ? "Assembled output" : mainVideoUrl ? "Draft output" : "Selected shot preview"}</p>
+                </div>
+                <div className="mx-auto w-full max-w-[360px] overflow-hidden rounded-lg border border-black/10 bg-slate-950">
+                  {primaryPreviewUrl ? (
+                    <video className="aspect-[9/16] w-full bg-black object-contain" controls src={primaryPreviewUrl} />
+                  ) : (
+                    <div className="flex aspect-[9/16] items-center justify-center text-sm text-white/55">No video or shot preview yet.</div>
+                  )}
+                </div>
+                <div className="flex flex-wrap items-center justify-center gap-2">
+                  <Badge>{assembledUrl ? "Assembled" : "Draft"}</Badge>
+                  <Badge>{run?.preview.assembled_has_audio ? "Audio" : "Audio pending"}</Badge>
+                  <Badge>{totalSeconds}s timeline</Badge>
+                </div>
+              </div>
+
+              <div className="grid content-start gap-3 rounded-lg border border-black/10 bg-white p-4">
+                <div>
+                  <p className="text-sm font-semibold text-slate-950">Storyboard shots</p>
+                  <p className="mt-1 text-xs leading-5 text-slate-500">Select a shot to inspect or regenerate it.</p>
+                </div>
+                <div className="grid gap-3 lg:grid-cols-3 xl:grid-cols-1">
+                  {timelineSegments.slice(0, 3).map((segment) => {
+                    const active = selectedSegment?.shot_id === segment.shot_id;
+                    const replacementReady = Boolean(segment.replacement_video_url);
+                    return (
+                      <button
+                        key={segment.shot_id}
+                        className={`rounded-lg border p-3 text-left transition ${
+                          active ? "border-blue-300 bg-blue-50" : "border-black/10 bg-[#f5f5f7] hover:border-blue-200"
+                        }`}
+                        type="button"
+                        onClick={() => selectSegment(segment)}
+                      >
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <Badge>Shot {segment.order_index ?? "-"}</Badge>
+                          <Badge className={replacementReady ? "border-emerald-200 bg-emerald-50 text-emerald-700" : ""}>
+                            {segmentStatusText(segment)}
+                          </Badge>
+                        </div>
+                        <p className="mt-3 text-sm font-semibold text-slate-950">{segment.beat ?? segment.shot_id}</p>
+                        <p className="mt-1 line-clamp-3 text-xs leading-5 text-slate-500">{segment.subtitle ?? segment.prompt ?? "No subtitle yet."}</p>
+                      </button>
+                    );
+                  })}
+                  {!timelineSegments.length ? <p className="rounded-md bg-[#f5f5f7] p-4 text-sm text-slate-500 lg:col-span-3 xl:col-span-1">No generated segments yet.</p> : null}
+                </div>
+              </div>
+
+              <div className="grid content-start gap-3 rounded-lg border border-black/10 bg-[#f5f5f7] p-4">
+                {selectedSegment ? (
+                  <>
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <p className="text-sm font-semibold text-slate-950">{selectedSegment.beat ?? selectedSegment.shot_id}</p>
+                        <p className="mt-1 font-mono text-[11px] text-slate-500">{selectedSegment.time_range ?? `${selectedSegment.start_seconds ?? 0}-${selectedSegment.end_seconds ?? 4}s`}</p>
+                      </div>
+                      <Badge>{selectedSegment.source === "replacement_clip" ? "Replacement" : "Draft"}</Badge>
+                    </div>
+                    <div className="overflow-hidden rounded-md bg-slate-950">
+                      {run?.run_id && (selectedSegment.draft_video_url || selectedSegment.replacement_video_url) ? (
+                        <video
+                          className="aspect-[9/16] max-h-[280px] w-full object-contain"
+                          controls
+                          preload="metadata"
+                          src={editorClipVideoUrl(run.run_id, {
+                            shotId: selectedSegment.shot_id,
+                            sourceType: selectedSegment.source === "replacement_clip" ? "replacement_clip" : "draft_segment",
+                          })}
+                        />
+                      ) : (
+                        <div className="flex aspect-[9/16] max-h-[280px] items-center justify-center text-sm text-white/55">No segment preview.</div>
+                      )}
+                    </div>
+                    <div className="grid gap-2">
+                      <PromptBlock label="Subtitle" value={selectedSegment.subtitle} />
+                      <PromptBlock label="Voiceover" value={selectedSegment.voiceover} />
+                      <PromptBlock label="Image prompt" value={selectedSegment.prompt} />
+                      <PromptBlock label="Video prompt" value={selectedSegment.draft_prompt} />
+                    </div>
+                    <div className="grid gap-2">
+                      <Button className="w-full" variant="secondary" onClick={regenerateSelectedClip} disabled={!selectedSegment.shot_id || regeneratingShotId === selectedSegment.shot_id}>
+                        {regeneratingShotId === selectedSegment.shot_id ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCcw className="h-4 w-4" />}
+                        Regenerate this shot
+                      </Button>
+                      <div className="grid grid-cols-2 gap-2">
+                        <Button variant="outline" onClick={() => replaceSegmentSource(selectedSegment, "draft_segment")}>
+                          Use draft
+                        </Button>
+                        <Button variant="outline" onClick={() => replaceSegmentSource(selectedSegment, "replacement_clip")} disabled={!selectedSegment.replacement_video_url}>
+                          Use replacement
+                        </Button>
+                      </div>
+                      <div className="grid grid-cols-2 gap-2">
+                        <Button variant="outline" onClick={saveTimeline} disabled={saving}>
+                          {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+                          Save
+                        </Button>
+                        <Button variant="secondary" onClick={assembleTimeline} disabled={!run || assembling || assemblyActive}>
+                          {assembling || assemblyActive ? <Loader2 className="h-4 w-4 animate-spin" /> : <Video className="h-4 w-4" />}
+                          Assemble
+                        </Button>
+                      </div>
+                    </div>
+                  </>
+                ) : (
+                  <p className="rounded-md bg-white p-4 text-sm text-slate-500">Select a shot to inspect and regenerate it.</p>
+                )}
+              </div>
+            </div>
+          </Card>
+
+          <Card className="hidden p-4">
             <CardHeader className="mb-3">
               <div>
                 <CardTitle>Cut Desk</CardTitle>
@@ -587,7 +727,7 @@ export default function EditorPage() {
           </Card>
         </main>
 
-        <aside className="grid gap-6 xl:sticky xl:top-24 xl:self-start">
+        <aside className="hidden">
           <Card>
             <CardHeader>
               <div>
@@ -877,6 +1017,33 @@ function SegmentPreview({
       </div>
     </div>
   );
+}
+
+function PromptBlock({ label, value }: { label: string; value?: string | null }) {
+  return (
+    <div className="rounded-md bg-white p-3">
+      <p className="text-[11px] font-medium uppercase text-slate-400">{label}</p>
+      <p className="mt-1 line-clamp-4 text-xs leading-5 text-slate-700">{value || "Not recorded for this segment."}</p>
+    </div>
+  );
+}
+
+function segmentStatusText(segment: TimelineSegment) {
+  const replacement = String(segment.replacement_status ?? "").toLowerCase();
+  const artifact = String(segment.artifact_status ?? segment.task_status ?? "").toLowerCase();
+  if (replacement === "queued") {
+    return "queued";
+  }
+  if (replacement === "processing" || ["running", "processing", "submitted", "pending", "real_task_pending"].includes(artifact)) {
+    return "generating";
+  }
+  if (replacement === "failed" || artifact === "failed" || artifact === "provider_failed") {
+    return "failed";
+  }
+  if (segment.source === "replacement_clip" && segment.replacement_video_url) {
+    return "replacement";
+  }
+  return "draft";
 }
 
 function TimelineRuler({ totalSeconds }: { totalSeconds: number }) {

@@ -15,7 +15,7 @@ class Settings(BaseSettings):
 
     app_name: str = "ViralCutAI API"
     database_url: str = "postgresql+psycopg://viralcutai:viralcutai@localhost:5432/viralcutai"
-    api_cors_origins: str = "http://localhost:3000"
+    api_cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
     volcengine_api_key: str | None = None
     volcengine_base_url: str | None = None
     volcengine_endpoint_id: str | None = None

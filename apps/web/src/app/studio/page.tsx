@@ -157,6 +157,31 @@ const initialForm = {
   platform: "TikTok Shop",
 };
 
+function splitSellingPoints(value: string) {
+  return value
+    .split(",")
+    .map((point) => point.trim())
+    .filter(Boolean);
+}
+
+function collectionToBrief(collection: AssetCollection | null) {
+  if (!collection) {
+    return { sellingPoints: [] as string[], materialNotes: "", visualStyle: "" };
+  }
+  const sellingPoints = [
+    ...collection.tags.slice(0, 4),
+    collection.summary,
+  ]
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .slice(0, 5);
+  return {
+    sellingPoints,
+    materialNotes: [collection.description, collection.usage_notes].filter(Boolean).join(" "),
+    visualStyle: [collection.category, ...collection.tags.slice(0, 6)].filter(Boolean).join(", "),
+  };
+}
+
 function assetKindForFile(file: File) {
   if (file.type.startsWith("video/")) {
     return "video";
@@ -270,6 +295,7 @@ export default function StudioPage() {
   const [selectedAssetSliceIds, setSelectedAssetSliceIds] = useState<string[]>([]);
   const [selectedFactorIds, setSelectedFactorIds] = useState<string[]>([]);
   const [selectedTemplateId, setSelectedTemplateId] = useState("");
+  const [templateMode, setTemplateMode] = useState<"auto" | "none" | "manual">("auto");
   const [selectedReferenceId, setSelectedReferenceId] = useState("");
   const [generationMode, setGenerationMode] = useState<"viral_rewrite" | "template_fusion" | "auto_mix">("auto_mix");
   const [autoRetrieveAssets, setAutoRetrieveAssets] = useState(true);
@@ -365,6 +391,21 @@ export default function StudioPage() {
     () => assetCollections.find((collection) => collection.id === selectedAssetCollectionId) ?? null,
     [assetCollections, selectedAssetCollectionId],
   );
+  const selectedInputReference = useMemo(
+    () => references.find((reference) => reference.id === selectedReferenceId) ?? null,
+    [references, selectedReferenceId],
+  );
+  const selectedInputTemplate = useMemo(
+    () => templates.find((template) => template.id === selectedTemplateId) ?? null,
+    [templates, selectedTemplateId],
+  );
+  const effectiveGenerationMode: "viral_rewrite" | "template_fusion" | "auto_mix" = selectedTemplateId
+    ? "template_fusion"
+    : selectedReferenceId
+    ? "viral_rewrite"
+    : "auto_mix";
+  const templateSelectValue = templateMode === "manual" && selectedTemplateId ? selectedTemplateId : templateMode;
+  const collectionBrief = useMemo(() => collectionToBrief(selectedAssetCollection), [selectedAssetCollection]);
   const visibleLibraryAssets = useMemo(
     () => libraryAssets.filter((asset) => !selectedAssetCollectionId || asset.collection_id === selectedAssetCollectionId),
     [libraryAssets, selectedAssetCollectionId],
@@ -372,10 +413,26 @@ export default function StudioPage() {
   const retrievalEvidence = useMemo(() => run?.strategy.retrieval_evidence ?? [], [run]);
   const assetUsagePlan = useMemo(() => run?.strategy.asset_usage_plan ?? [], [run]);
   const factorSelectionReason = useMemo(() => run?.strategy.factor_selection_reason ?? [], [run]);
-  const selectedViralReference = useMemo(() => {
-    const value = (run?.strategy as Record<string, unknown> | undefined)?.selected_reference_video;
+  const runRetrievalContext = useMemo(() => {
+    const value = (run?.request_payload as Record<string, unknown> | undefined)?.retrieval_context;
     return isRecord(value) ? value : null;
   }, [run]);
+  const runSelectedCollection = useMemo(() => {
+    const value = runRetrievalContext?.selected_collection;
+    return isRecord(value) ? value : null;
+  }, [runRetrievalContext]);
+  const runSelectedReference = useMemo(() => {
+    const value = runRetrievalContext?.selected_reference_video;
+    return isRecord(value) ? value : null;
+  }, [runRetrievalContext]);
+  const runAutoFactors = useMemo(() => {
+    const value = runRetrievalContext?.auto_factors;
+    return Array.isArray(value) ? value.filter(isRecord) : [];
+  }, [runRetrievalContext]);
+  const selectedViralReference = useMemo(() => {
+    const value = runSelectedReference ?? (run?.strategy as Record<string, unknown> | undefined)?.selected_reference_video;
+    return isRecord(value) ? value : null;
+  }, [run, runSelectedReference]);
   const referenceMatchReason = String((run?.strategy as Record<string, unknown> | undefined)?.reference_match_reason ?? "");
   const referenceMatchMode = String((run?.strategy as Record<string, unknown> | undefined)?.reference_match_mode ?? "none");
   const autoReferenceCount = Array.isArray((run?.strategy as Record<string, unknown> | undefined)?.auto_references)
@@ -527,28 +584,43 @@ export default function StudioPage() {
     setForm((current) => ({ ...current, [field]: value }));
   }
 
+  function updateTemplateSelection(value: string) {
+    if (value === "auto" || value === "none") {
+      setTemplateMode(value);
+      setSelectedTemplateId("");
+      return;
+    }
+    setTemplateMode("manual");
+    setSelectedTemplateId(value);
+  }
+
   function buildPayload(): GenerationRunRequest {
+    const collection = selectedAssetCollection;
+    const referenceTitle = selectedInputReference?.title ?? "";
+    const templateStrategy = selectedInputTemplate?.strategy ?? "";
     return {
-      generation_mode: generationMode,
+      generation_mode: effectiveGenerationMode,
       asset_collection_id: selectedAssetCollectionId || null,
-      product_name: form.productName,
-      category: form.category,
-      selling_points: form.sellingPoints
-        .split(",")
-        .map((point) => point.trim())
-        .filter(Boolean),
-      target_audience: form.targetAudience,
+      product_name: collection?.product_name || form.productName,
+      category: collection?.category || form.category,
+      selling_points: collectionBrief.sellingPoints.length ? collectionBrief.sellingPoints : splitSellingPoints(form.sellingPoints),
+      target_audience: collection ? `TikTok Shop buyers for ${collection.category}` : form.targetAudience,
       price_offer: form.priceOffer,
-      material_notes: form.materialNotes,
-      creative_goal: form.creativeGoal,
-      reference_style: form.referenceStyle,
-      visual_style: form.visualStyle,
+      material_notes: collectionBrief.materialNotes || form.materialNotes,
+      creative_goal:
+        effectiveGenerationMode === "viral_rewrite" && referenceTitle
+          ? `Rewrite the selected reference method for ${collection?.product_name || form.productName}.`
+          : effectiveGenerationMode === "template_fusion" && selectedInputTemplate
+          ? `Apply the selected creative template to ${collection?.product_name || form.productName}.`
+          : form.creativeGoal,
+      reference_style: referenceTitle || templateStrategy || form.referenceStyle,
+      visual_style: collectionBrief.visualStyle || form.visualStyle,
       duration_seconds: form.durationSeconds,
       platform: form.platform,
       asset_ids: selectedAssetIds,
       asset_slice_ids: selectedAssetSliceIds,
       reference_video_id: selectedReferenceId || null,
-      template_id: selectedTemplateId || null,
+      template_id: templateMode === "manual" ? selectedTemplateId || null : null,
       factor_ids: selectedFactorIds,
       auto_retrieve_assets: autoRetrieveAssets,
       auto_retrieve_factors: autoRetrieveFactors,
@@ -725,6 +797,115 @@ export default function StudioPage() {
 
       <section className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_340px] 2xl:grid-cols-[minmax(0,1fr)_380px]">
         <Card className="p-4 xl:col-span-2">
+          <CardHeader className="mb-3">
+            <div>
+              <CardTitle>Generate From Asset Set</CardTitle>
+              <CardDescription>Choose the asset set, platform, optional reference, and optional template. Product details come from My Assets.</CardDescription>
+            </div>
+            <Sparkles className="h-5 w-5 text-blue-600" />
+          </CardHeader>
+
+          <div className="grid gap-4 lg:grid-cols-[minmax(0,0.9fr)_minmax(320px,0.55fr)]">
+            <div className="grid gap-4 rounded-lg border border-black/10 bg-[#f5f5f7] p-4">
+              <div className="grid gap-3 md:grid-cols-2">
+                <label className="block text-sm font-medium text-slate-700">
+                  Asset collection
+                  <select className={inputClass} value={selectedAssetCollectionId} onChange={(event) => setSelectedAssetCollectionId(event.target.value)}>
+                    <option value="">Choose an asset collection</option>
+                    {assetCollections.map((collection) => (
+                      <option key={collection.id} value={collection.id}>
+                        {collection.product_name} / {collection.category}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="block text-sm font-medium text-slate-700">
+                  Platform
+                  <input className={inputClass} value={form.platform} onChange={(event) => updateField("platform", event.target.value)} />
+                </label>
+                <label className="block text-sm font-medium text-slate-700">
+                  Reference video
+                  <select className={inputClass} value={selectedReferenceId} onChange={(event) => setSelectedReferenceId(event.target.value)}>
+                    <option value="">Auto select reference</option>
+                    {references.map((item) => (
+                      <option key={item.id} value={item.id}>
+                        {item.title}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="block text-sm font-medium text-slate-700">
+                  Template
+                  <select className={inputClass} value={templateSelectValue} onChange={(event) => updateTemplateSelection(event.target.value)}>
+                    <option value="auto">Auto select template</option>
+                    <option value="none">No template</option>
+                    {templates.map((item) => (
+                      <option key={item.id} value={item.id}>
+                        {item.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+
+              <div className="grid gap-2 md:grid-cols-[minmax(0,1fr)_auto]">
+                <div className="flex flex-wrap gap-1">
+                  <Badge>{effectiveGenerationMode === "viral_rewrite" ? "Manual reference" : effectiveGenerationMode === "template_fusion" ? "Template selected" : "Auto mix"}</Badge>
+                  <Badge>{selectedReferenceId ? "Reference: manual" : "Reference: auto"}</Badge>
+                  <Badge>{templateMode === "manual" ? "Template: manual" : templateMode === "none" ? "Template: none" : "Template: auto"}</Badge>
+                </div>
+                <Button variant="secondary" onClick={runAgents} disabled={loading || generationActive || !selectedAssetCollectionId}>
+                  {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+                  {loading ? "Queueing" : generationActive ? "Running" : "Run agents"}
+                </Button>
+              </div>
+            </div>
+
+            <div className="grid gap-3 rounded-lg border border-black/10 bg-white p-4">
+              <div>
+                <p className="text-sm font-semibold text-slate-950">Current setup</p>
+                <p className="mt-1 text-xs leading-5 text-slate-500">The next run will use this asset context.</p>
+              </div>
+              {selectedAssetCollection ? (
+                <div className="rounded-md border border-blue-100 bg-blue-50 p-3">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p className="min-w-0 flex-1 truncate text-sm font-semibold text-blue-950">{selectedAssetCollection.product_name}</p>
+                    <Badge>{selectedAssetCollection.assets.length} assets</Badge>
+                  </div>
+                  <p className="mt-1 line-clamp-3 text-xs leading-5 text-blue-800">{selectedAssetCollection.summary || selectedAssetCollection.description}</p>
+                </div>
+              ) : (
+                <EmptyState text="Choose an asset collection first." />
+              )}
+              {selectedInputReference ? (
+                <div className="rounded-md border border-emerald-100 bg-emerald-50 p-3">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Badge>{selectedInputReference.category}</Badge>
+                    <Badge>{selectedInputReference.analysis.visual_verified ? "verified" : "structured only"}</Badge>
+                  </div>
+                  <p className="mt-2 line-clamp-3 text-xs font-medium leading-5 text-emerald-950">{selectedInputReference.title}</p>
+                </div>
+              ) : (
+                <div className="rounded-md border border-black/10 bg-[#f5f5f7] p-3 text-xs leading-5 text-slate-500">
+                  Reference video is set to auto.
+                </div>
+              )}
+              {selectedInputTemplate && templateMode === "manual" ? (
+                <div className="rounded-md border border-violet-100 bg-violet-50 p-3">
+                  <Badge>{selectedInputTemplate.category}</Badge>
+                  <p className="mt-2 line-clamp-2 text-xs font-medium leading-5 text-violet-950">{selectedInputTemplate.name}</p>
+                </div>
+              ) : (
+                <div className="rounded-md border border-black/10 bg-[#f5f5f7] p-3 text-xs leading-5 text-slate-500">
+                  Template is set to {templateMode === "none" ? "none" : "auto"}.
+                </div>
+              )}
+            </div>
+          </div>
+          {error ? <p className="mt-4 rounded-md border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{error}</p> : null}
+        </Card>
+
+        <Card className="hidden">
           <CardHeader className="mb-3">
             <div>
               <CardTitle>Generation Brief</CardTitle>
@@ -1062,6 +1243,62 @@ export default function StudioPage() {
           <Card className="p-4">
             <CardHeader className="mb-3">
               <div>
+                <CardTitle>Evidence Used</CardTitle>
+                <CardDescription>What the latest run actually received from My Assets, Viral Library, and Templates.</CardDescription>
+              </div>
+              <Search className="h-5 w-5 text-blue-600" />
+            </CardHeader>
+            {run ? (
+              <div className="grid gap-3 lg:grid-cols-3">
+                <div className="rounded-lg border border-blue-100 bg-blue-50 p-4">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Badge>Asset set</Badge>
+                    <Badge>{String(runSelectedCollection?.asset_count ?? run.preview.source_asset_count ?? 0)} assets</Badge>
+                  </div>
+                  <p className="mt-3 text-sm font-semibold text-blue-950">
+                    {String(runSelectedCollection?.product_name ?? selectedAssetCollection?.product_name ?? run.request_payload.product_name)}
+                  </p>
+                  <p className="mt-1 line-clamp-3 text-xs leading-5 text-blue-800">
+                    {String(run.strategy.source_asset_summary ?? runSelectedCollection?.summary ?? "No asset evidence summary recorded.")}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-emerald-100 bg-emerald-50 p-4">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Badge>Reference</Badge>
+                    <Badge>{String(runRetrievalContext?.reference_match_mode ?? referenceMatchMode)}</Badge>
+                  </div>
+                  <p className="mt-3 line-clamp-3 text-sm font-semibold leading-5 text-emerald-950">
+                    {String(runSelectedReference?.title ?? "No selected reference")}
+                  </p>
+                  <p className="mt-1 text-xs leading-5 text-emerald-800">
+                    {String((runRetrievalContext?.reference_match_reason ?? referenceMatchReason) || "Auto mode did not force an unrelated reference.")}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-violet-100 bg-violet-50 p-4">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Badge>Viral factors</Badge>
+                    <Badge>{runAutoFactors.length || run.viral_factors.length} used</Badge>
+                  </div>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {(runAutoFactors.length ? runAutoFactors : run.viral_factors).slice(0, 8).map((factor, index) => (
+                      <Badge key={`${String(factor.factor_key ?? factor.name ?? "factor")}-${index}`}>
+                        {String(factor.category ?? "factor")}
+                      </Badge>
+                    ))}
+                  </div>
+                  <p className="mt-3 line-clamp-2 text-xs leading-5 text-violet-800">
+                    {String(runRetrievalContext?.methodology_summary ?? "Factors are shown after the strategy agent packages them for this product.")}
+                  </p>
+                </div>
+              </div>
+            ) : (
+              <EmptyState text="Run agents to see which assets, reference, and factors were used." />
+            )}
+          </Card>
+
+          <Card className="p-4">
+            <CardHeader className="mb-3">
+              <div>
                 <CardTitle>Run Progress</CardTitle>
                 <CardDescription>{run?.summary ?? "Events update while the background run is active."}</CardDescription>
               </div>
@@ -1085,7 +1322,7 @@ export default function StudioPage() {
             </div>
           </Card>
 
-          <details className="rounded-lg border border-black/10 bg-white p-4 shadow-sm shadow-black/[0.03]">
+          <details open className="rounded-lg border border-black/10 bg-white p-4 shadow-sm shadow-black/[0.03]">
             <summary className="flex cursor-pointer items-center justify-between gap-3 text-sm font-semibold text-slate-950">
               Strategy Details
               <Sparkles className="h-5 w-5 text-blue-600" />
@@ -1212,7 +1449,7 @@ export default function StudioPage() {
             )}
           </details>
 
-          <Card>
+          <Card className="hidden">
             <CardHeader>
               <div>
                 <CardTitle>Video Editor</CardTitle>
@@ -1481,7 +1718,7 @@ export default function StudioPage() {
             )}
           </Card>
 
-          <details className="rounded-lg border border-black/10 bg-white p-4 shadow-sm shadow-black/[0.03]">
+          <details open className="rounded-lg border border-black/10 bg-white p-4 shadow-sm shadow-black/[0.03]">
             <summary className="flex cursor-pointer items-center justify-between gap-3 text-sm font-semibold text-slate-950">
               Media Artifacts
               <ImageIcon className="h-5 w-5 text-cyan-700" />
@@ -1568,6 +1805,21 @@ export default function StudioPage() {
                     {!run ? <p className="rounded-md bg-white/10 p-3 text-xs leading-5 text-white/60">Storyboard captions will render here.</p> : null}
                   </div>
                 </div>
+              )}
+            </div>
+            <div className="mt-3">
+              {run ? (
+                <Link href="/editor">
+                  <Button className="w-full" variant="secondary">
+                    <Scissors className="h-4 w-4" />
+                    Open Editor
+                  </Button>
+                </Link>
+              ) : (
+                <Button className="w-full" variant="outline" disabled>
+                  <Scissors className="h-4 w-4" />
+                  Open Editor
+                </Button>
               )}
             </div>
             {run && timelineSegments.length ? (
@@ -1673,7 +1925,7 @@ export default function StudioPage() {
             ) : null}
           </Card>
 
-          <details className="rounded-lg border border-black/10 bg-white p-4 shadow-sm shadow-black/[0.03]">
+          <details open className="rounded-lg border border-black/10 bg-white p-4 shadow-sm shadow-black/[0.03]">
             <summary className="flex cursor-pointer items-center justify-between gap-3 text-sm font-semibold text-slate-950">
               My Assets Used
               <FileUp className="h-5 w-5 text-blue-600" />
@@ -1693,7 +1945,7 @@ export default function StudioPage() {
             </div>
           </details>
 
-          <details className="rounded-lg border border-black/10 bg-white p-4 shadow-sm shadow-black/[0.03]">
+          <details open className="rounded-lg border border-black/10 bg-white p-4 shadow-sm shadow-black/[0.03]">
             <summary className="flex cursor-pointer items-center justify-between gap-3 text-sm font-semibold text-slate-950">
               Compliance
               {run?.compliance.passed ? <CheckCircle2 className="h-5 w-5 text-emerald-600" /> : <ShieldCheck className="h-5 w-5 text-slate-500" />}

@@ -12,10 +12,21 @@ Agent-based AIGC commerce video workspace for the AI full-stack challenge.
 
 ## Quick Start
 
+Prerequisites:
+
+- Node.js 24
+- pnpm 11.4.0
+- Python 3.11
+- Docker Desktop for PostgreSQL
+- FFmpeg available on `PATH` for video/keyframe assembly
+
 ```powershell
 docker compose up -d postgres
 pnpm install
 python -m pip install -r apps/api/requirements.txt
+
+Copy-Item .env.example .env.local
+# Fill .env.local with the judge's Volcengine / Seedance / FastMoss credentials.
 
 pnpm dev:api
 pnpm dev:web
@@ -31,11 +42,12 @@ Open:
 1. Create a private Asset Collection in My Assets, then upload product images or videos. Images are analyzed through the Volcengine multimodal endpoint; videos are keyframe-sampled with FFmpeg and analyzed through the same endpoint.
 2. Import public TikTok ecommerce signals from FastMoss as owner-curated viral candidates. The system stores structured market data first, then selected candidates can be manually upgraded with an attached MP4 for keyframe verification.
 3. Cluster two to five external references into n:1 creative templates when a reusable pattern appears.
-4. Open Studio, choose Viral Rewrite, Template Fusion, or Auto Mix, then select private assets plus external reference analysis, templates, and factors.
+4. Open Studio, select an Asset Collection and platform, choose reference-video mode (auto/manual), choose template mode (auto/none/manual), then run agents.
 5. The Generation Graph runs Viral Strategy Agent, Script & Storyboard Agent, and Render & Review Agent.
-6. Studio shows factor board, storyboard, cover image status, video artifacts, voice/subtitle/BGM plans, preview, export manifest, and compliance.
-7. Analytics selects two to four succeeded generation runs, accepts real manually entered metrics, and runs the Attribution & Experiment Agent.
-8. Trace Console shows both Generation Graph and Experiment Analysis Graph traces.
+6. Studio shows factor board, storyboard, provider artifacts, preview, export manifest, and compliance in a simplified generation view.
+7. Open Editor, preview the full draft, inspect the three fixed shots, regenerate one shot, and assemble an exportable MP4.
+8. Analytics selects two to four succeeded generation runs, accepts real manually entered metrics, and runs the Attribution & Experiment Agent.
+9. Trace views show both Generation Graph and Experiment Analysis Graph execution details.
 
 ## Public API
 
@@ -64,10 +76,16 @@ Open:
 - `GET /generation-runs`
 - `GET /generation-runs/{run_id}`
 - `GET /generation-runs/{run_id}/export`
+- `GET /generation-runs/{run_id}/editor-timeline`
+- `PATCH /generation-runs/{run_id}/editor-timeline`
 - `POST /generation-runs/{run_id}/retry`
 - `PATCH /generation-runs/{run_id}/storyboard/{shot_id}`
 - `POST /generation-runs/{run_id}/storyboard/{shot_id}/regenerate`
+- `POST /generation-runs/{run_id}/storyboard/{shot_id}/regenerate-clip`
 - `POST /generation-runs/{run_id}/render-preview`
+- `POST /generation-runs/{run_id}/assemble-preview`
+- `GET /generation-runs/{run_id}/assembled-video`
+- `GET /generation-runs/{run_id}/editor-clip-video`
 - `POST /experiments/analyze`
 - `GET /experiments`
 - `GET /experiments/{experiment_id}`
@@ -122,12 +140,12 @@ erDiagram
 | One-click video generation | One Studio action creates provider-tracked preview artifacts, one real cover image when configured, and real Seedance video when configured |
 | Task progress | `RunEvent` stages and Agent traces |
 | Preview / export | Real video URL when available, plus JSON export manifest |
-| TTS / subtitles / BGM | Provider-pending planning artifacts |
+| TTS / subtitles / BGM | Provider-pending planning artifacts; assembled local MP4 can include generated placeholder/editor-timeline audio until dedicated providers are connected |
 | Generation trace | `AgentStep` plus Trace Console |
 | A/B comparison and attribution | Experiment Analysis Graph over real manually entered metrics |
 | Compliance flow | Render & Review Agent with conditional rewrite |
-| Shot-level intervention | Patch/regenerate/render-preview interfaces and lightweight UI |
-| CI/CD | GitHub Actions compile, lint, and build |
+| Shot-level intervention | Editor timeline, per-shot preview, real Seedance replacement clip generation, and FFmpeg assembly |
+| CI/CD | GitHub Actions CI compile, lint, and build |
 
 ## Provider Truth Boundary
 
@@ -148,7 +166,10 @@ Real Volcengine text/multimodal understanding, Volcengine image generation, Seed
 
 ```env
 DATABASE_URL=postgresql+psycopg://viralcutai:viralcutai@localhost:5432/viralcutai
-API_CORS_ORIGINS=http://localhost:3000
+API_CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
+
+# Copy this file to .env.local and fill provider credentials locally.
+# Do not commit .env.local or real provider keys.
 VOLCENGINE_API_KEY=
 VOLCENGINE_BASE_URL=
 # Text / chat endpoint for strategy, script, image prompt planning, experiments,
@@ -178,6 +199,8 @@ UPLOAD_DIR=storage/uploads
 
 Use `.env.example` as the public template and put real local secrets in `.env.local`. The local secret file is ignored by Git. Uploaded assets are stored under `storage/`, which is also gitignored.
 
+The repository includes public demo seed data under `apps/api/app/static`: the Aurora Glow product assets plus 17 owner-curated viral-library references, 136 factors, and local cover thumbnails. After the API starts, reviewers can seed everything with `POST /demo-data/seed`; this creates the demo product collection and viral library in their local database without needing any of the author's private `storage/` files.
+
 Provider roles are intentionally separated: `VOLCENGINE_ENDPOINT_ID` / `VOLCENGINE_TEXT_MODEL` power text generation and image prompt planning, `VOLCENGINE_IMAGE_MODEL` powers real cover image generation, `SEEDANCE_ENDPOINT_ID` / `SEEDANCE_MODEL` powers video generation, and `FASTMOSS_API_KEY` or `FASTMOSS_CLIENT_ID` / `FASTMOSS_CLIENT_SECRET` power Viral Library market-data import. If the image model is missing, the cover image is reported as not generated and the API does not call the image endpoint.
 
 FastMoss import calls `POST /video/v1/search` with ecommerce-video filtering and then uses Volcengine to extract a structured-only 8-factor board. These records are marked `fastmoss_structured_only` and `visual_verified=false`. Selected references can be upgraded by manually attaching a source MP4; the backend stores the file under `storage/`, runs FFmpeg keyframe analysis, and regenerates factors with `owner_viral_verified` evidence. Source footage is not copied into generated videos.
@@ -189,3 +212,31 @@ Analytics requires real metrics for every selected variant: views, watch complet
 Volcengine `RateLimitExceeded.EndpointTPMExceeded` means the endpoint exceeded its tokens-per-minute quota. The app retries with a longer TPM-aware delay, then marks the provider step `real_failed` if the configured endpoint still cannot serve the request.
 
 More provider details are in `docs/provider-integration.md`.
+
+## Submission / GitHub Safety
+
+This repository is safe to publish when only tracked files are committed. Real provider keys, uploaded assets, generated videos, logs, and local caches are excluded by `.gitignore`.
+
+Before uploading:
+
+```powershell
+git status --short
+git grep -n -E "(AKLT[A-Za-z0-9]{10,}|Bearer [A-Za-z0-9._-]{20,}|sk-[A-Za-z0-9_-]{20,}|VOLCENGINE_API_KEY=.+|SEEDANCE_API_KEY=.+|FASTMOSS_(API_KEY|CLIENT_SECRET)=.+)" -- . ':!README.md' ':!docs/submission-checklist.md' ':!pnpm-lock.yaml' ':!apps/web/pnpm-lock.yaml'
+pnpm verify
+```
+
+Expected local demo path for reviewers:
+
+1. Copy `.env.example` to `.env.local`.
+2. Fill their own Volcengine / Seedance / FastMoss credentials.
+3. Run `docker compose up -d postgres`.
+4. Run `python -m pip install -r apps/api/requirements.txt`.
+5. Run `pnpm install`.
+6. Start `pnpm dev:api` and `pnpm dev:web`.
+7. Seed the public demo assets and viral library:
+
+   ```powershell
+   Invoke-RestMethod -Method Post http://127.0.0.1:8000/demo-data/seed
+   ```
+
+8. Open `http://localhost:3000`.

@@ -440,6 +440,7 @@ def get_editor_timeline(run_id: UUID, db: Session) -> dict[str, Any]:
 def update_editor_timeline(run_id: UUID, payload: dict[str, Any], db: Session) -> GenerationRun:
     run = get_generation_run(run_id, db)
     timeline = _normalize_editor_timeline(payload.get("clips") or [], run)
+    timeline = _preserve_ready_replacement_clips(timeline, run)
     run.preview = {
         **(run.preview or {}),
         "editor_timeline": timeline,
@@ -1033,6 +1034,47 @@ def _replace_editor_timeline_shot_with_replacement(run: GenerationRun, shot_id: 
     except ValueError:
         return
     run.preview = {**preview, "editor_timeline": normalized}
+
+
+def _preserve_ready_replacement_clips(timeline: dict[str, Any], run: GenerationRun) -> dict[str, Any]:
+    clips = timeline.get("clips")
+    if not isinstance(clips, list) or not clips:
+        return timeline
+    ready_shots = {
+        str(segment.get("shot_id"))
+        for segment in (run.preview or {}).get("timeline_segments") or []
+        if isinstance(segment, dict)
+        and segment.get("shot_id")
+        and segment.get("replacement_video_url")
+        and segment.get("replacement_status") == "ready"
+    }
+    if not ready_shots:
+        return timeline
+    next_clips: list[dict[str, Any]] = []
+    changed = False
+    for raw in clips:
+        item = dict(raw)
+        shot_id = str(item.get("shot_id") or "")
+        if shot_id in ready_shots and item.get("source_type") == "draft_segment":
+            duration = max(1, int(item.get("duration_seconds") or 4))
+            item.update(
+                {
+                    "source_type": "replacement_clip",
+                    "source_start_seconds": 0,
+                    "source_end_seconds": duration,
+                    "duration_seconds": duration,
+                    "source_label": "Replacement clip",
+                    "status": "ready",
+                }
+            )
+            changed = True
+        next_clips.append(item)
+    if not changed:
+        return timeline
+    try:
+        return _normalize_editor_timeline(next_clips, run)
+    except ValueError:
+        return timeline
 
 
 def _hydrate_editor_timeline_sources(clips: list[dict[str, Any]], run: GenerationRun) -> list[dict[str, Any]]:

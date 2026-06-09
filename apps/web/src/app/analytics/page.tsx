@@ -181,7 +181,7 @@ export default function AnalyticsPage() {
         <StatCard label="Experiments" value={String(experiments.length)} detail="Real metric analyses." />
         <StatCard label="Factors" value={String(factorCount)} detail="Generated factor snapshots." />
         <StatCard label="Selected" value={`${selectedRunIds.length}/4`} detail="A/B variants." />
-        <StatCard label="Winner" value={latestExperiment?.result.winner_label ?? "-"} detail="Latest analysis." />
+        <StatCard label="Top performer" value={latestExperiment?.result.winner_label ?? "-"} detail="Latest attribution result." />
       </section>
 
       <section className="mt-4 grid gap-4 xl:grid-cols-[320px_minmax(0,1fr)]">
@@ -293,7 +293,7 @@ export default function AnalyticsPage() {
             <CardHeader className="mb-3">
               <div>
                 <CardTitle>Latest analysis</CardTitle>
-                <CardDescription>{latestExperiment?.summary ?? "Run an experiment to see winner, lift, and next iteration advice."}</CardDescription>
+                <CardDescription>{latestExperiment?.summary ?? "Run an experiment to see the top performer, lift, and next iteration advice."}</CardDescription>
               </div>
               <Trophy className="h-5 w-5 text-amber-600" />
             </CardHeader>
@@ -307,7 +307,7 @@ export default function AnalyticsPage() {
                         <div className="flex flex-wrap items-center justify-between gap-2">
                           <p className="font-medium text-slate-950">{variant.label}</p>
                           <Badge className={variant.run_id === latestExperiment.winner_run_id ? "border-amber-200 bg-amber-50 text-amber-700" : ""}>
-                            {variant.run_id === latestExperiment.winner_run_id ? "winner" : "variant"}
+                            {variant.run_id === latestExperiment.winner_run_id ? "top performer" : "variant"}
                           </Badge>
                         </div>
                         <div className="mt-3 grid gap-2 sm:grid-cols-3 xl:grid-cols-5">
@@ -343,7 +343,7 @@ export default function AnalyticsPage() {
               <div className="grid gap-4">
                 <FactorAttributionChart experiment={latestExperiment} />
                 <div className="grid gap-3 md:grid-cols-2">
-                  {latestExperiment.attributions.map((factor) => (
+                  {latestExperiment.attributions.slice(0, 4).map((factor) => (
                     <div key={factor.id} className="rounded-lg border border-black/10 bg-[#f5f5f7] p-4">
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <p className="font-medium text-slate-950">{factor.factor_name}</p>
@@ -369,7 +369,7 @@ export default function AnalyticsPage() {
             )}
           </Card>
 
-          <details className="rounded-lg border border-black/10 bg-white p-4 shadow-sm shadow-black/[0.03]">
+          <details open className="rounded-lg border border-black/10 bg-white p-4 shadow-sm shadow-black/[0.03]">
             <summary className="flex cursor-pointer items-center justify-between gap-3 text-sm font-semibold text-slate-950">
               Analysis Agent trace
               <Sparkles className="h-5 w-5 text-cyan-700" />
@@ -458,9 +458,9 @@ function ExperimentCharts({ experiment }: { experiment: ExperimentAnalysis }) {
     { key: "revenue_per_1000_views", title: "Revenue / 1k views" },
   ];
   return (
-    <div className="grid gap-3 md:grid-cols-2">
+    <div className="grid gap-3 md:grid-cols-4">
       {chartMetrics.map((chart) => (
-        <MiniBarChart
+        <MetricDonut
           key={chart.key}
           rows={experiment.variants.map((variant) => ({
             label: variant.label,
@@ -475,35 +475,33 @@ function ExperimentCharts({ experiment }: { experiment: ExperimentAnalysis }) {
   );
 }
 
-function MiniBarChart({
+function MetricDonut({
   title,
   rows,
 }: {
   title: string;
   rows: Array<{ label: string; value: number; suffix?: string; highlight?: boolean }>;
 }) {
-  const maxValue = Math.max(1, ...rows.map((row) => row.value));
+  const total = Math.max(1, rows.reduce((sum, row) => sum + Math.max(0, row.value), 0));
+  const highlighted = rows.find((row) => row.highlight) ?? rows[0];
+  const share = Math.round((Math.max(0, highlighted?.value ?? 0) / total) * 100);
   return (
     <div className="rounded-lg border border-black/10 bg-[#f5f5f7] p-4">
-      <p className="text-sm font-semibold text-slate-950">{title}</p>
-      <div className="mt-3 space-y-3">
-        {rows.map((row) => (
-          <div key={`${title}-${row.label}`}>
-            <div className="mb-1 flex items-center justify-between gap-3 text-xs">
-              <span className="truncate font-medium text-slate-700">{row.label}</span>
-              <span className="font-mono text-slate-950">
-                {formatNumber(row.value)}
-                {row.suffix ?? ""}
-              </span>
-            </div>
-            <div className="h-2 overflow-hidden rounded-full bg-white">
-              <div
-                className={`h-full rounded-full ${row.highlight ? "bg-amber-500" : "bg-blue-600"}`}
-                style={{ width: `${Math.max(4, (row.value / maxValue) * 100)}%` }}
-              />
-            </div>
-          </div>
-        ))}
+      <div className="flex items-center gap-4">
+        <div
+          className="grid h-20 w-20 shrink-0 place-items-center rounded-full"
+          style={{ background: `conic-gradient(#f59e0b 0 ${share}%, #dbeafe ${share}% 100%)` }}
+        >
+          <div className="grid h-14 w-14 place-items-center rounded-full bg-white text-sm font-semibold text-slate-950">{share}%</div>
+        </div>
+        <div className="min-w-0">
+          <p className="text-sm font-semibold text-slate-950">{title}</p>
+          <p className="mt-1 truncate text-xs text-slate-500">{highlighted?.label ?? "Top performer"} share</p>
+          <p className="mt-2 font-mono text-sm text-slate-950">
+            {formatNumber(highlighted?.value ?? 0)}
+            {highlighted?.suffix ?? ""}
+          </p>
+        </div>
       </div>
     </div>
   );
@@ -511,40 +509,71 @@ function MiniBarChart({
 
 function FactorAttributionChart({ experiment }: { experiment: ExperimentAnalysis }) {
   const factors = experiment.attributions.slice(0, 8);
-  const maxScore = Math.max(1, ...factors.map((factor) => Number(factor.score) || 0));
   if (!factors.length) {
     return <Empty text="No factor attribution was returned for this analysis." />;
   }
+  const categoryRows = Array.from(
+    factors.reduce((map, factor) => {
+      const category = factor.category || "other";
+      map.set(category, (map.get(category) ?? 0) + Math.max(0, Number(factor.score) || 0));
+      return map;
+    }, new Map<string, number>()),
+  ).sort((a, b) => b[1] - a[1]);
+  const total = Math.max(1, categoryRows.reduce((sum, [, value]) => sum + value, 0));
+  const colors = ["#2563eb", "#10b981", "#f59e0b", "#ec4899", "#8b5cf6", "#64748b"];
+  const gradient = categoryRows
+    .reduce<{ parts: string[]; cursor: number }>(
+      (state, [, value], index) => {
+        const start = state.cursor;
+        const end = start + (value / total) * 100;
+        return {
+          cursor: end,
+          parts: [...state.parts, `${colors[index % colors.length]} ${start}% ${end}%`],
+        };
+      },
+      { parts: [], cursor: 0 },
+    )
+    .parts.join(", ");
   return (
-    <div className="rounded-lg border border-black/10 bg-[#f5f5f7] p-4">
-      <p className="text-sm font-semibold text-slate-950">Factor impact ranking</p>
-      <div className="mt-3 space-y-3">
-        {factors.map((factor) => {
-          const score = Number(factor.score) || 0;
-          return (
-            <div key={`factor-chart-${factor.id}`}>
-              <div className="mb-1 flex items-center justify-between gap-3 text-xs">
-                <span className="truncate font-medium text-slate-700">{factor.factor_name}</span>
-                <span className="font-mono text-slate-950">
-                  {score}
-                  <span className="ml-2 text-slate-400">lift {factor.lift}</span>
-                </span>
-              </div>
-              <div className="h-2 overflow-hidden rounded-full bg-white">
-                <div className="h-full rounded-full bg-blue-600" style={{ width: `${Math.max(4, (score / maxScore) * 100)}%` }} />
-              </div>
+    <div className="grid gap-4 rounded-lg border border-black/10 bg-[#f5f5f7] p-4 lg:grid-cols-[220px_minmax(0,1fr)]">
+      <div className="grid place-items-center">
+        <div className="grid h-40 w-40 place-items-center rounded-full" style={{ background: `conic-gradient(${gradient})` }}>
+          <div className="grid h-24 w-24 place-items-center rounded-full bg-white text-center">
+            <span className="text-xs text-slate-500">Factor mix</span>
+          </div>
+        </div>
+      </div>
+      <div>
+        <p className="text-sm font-semibold text-slate-950">Factor impact by category</p>
+        <div className="mt-3 grid gap-2 sm:grid-cols-2">
+          {categoryRows.map(([category, value], index) => (
+            <div key={category} className="flex items-center justify-between gap-3 rounded-md bg-white p-3 text-xs">
+              <span className="flex min-w-0 items-center gap-2 font-medium text-slate-700">
+                <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: colors[index % colors.length] }} />
+                <span className="truncate">{category}</span>
+              </span>
+              <span className="font-mono text-slate-950">{Math.round((value / total) * 100)}%</span>
             </div>
-          );
-        })}
+          ))}
+        </div>
       </div>
     </div>
   );
 }
 
-function NextIterationCard({ recommendation }: { recommendation?: Record<string, unknown> }) {
-  const keep = Array.isArray(recommendation?.keep) ? recommendation.keep.map(String).filter(Boolean) : [];
-  const change = typeof recommendation?.change === "string" ? recommendation.change : "";
-  const promptHint = typeof recommendation?.prompt_hint === "string" ? recommendation.prompt_hint : "";
+function NextIterationCard({ recommendation }: { recommendation?: Record<string, unknown> | string }) {
+  if (typeof recommendation === "string" && recommendation.trim()) {
+    return (
+      <div className="rounded-lg border border-blue-200 bg-blue-50 p-4">
+        <p className="text-sm font-medium text-slate-950">Next iteration</p>
+        <p className="mt-3 text-xs leading-5 text-blue-900">{recommendation}</p>
+      </div>
+    );
+  }
+  const recommendationObject = typeof recommendation === "object" && recommendation !== null ? recommendation : undefined;
+  const keep = Array.isArray(recommendationObject?.keep) ? recommendationObject.keep.map(String).filter(Boolean) : [];
+  const change = typeof recommendationObject?.change === "string" ? recommendationObject.change : "";
+  const promptHint = typeof recommendationObject?.prompt_hint === "string" ? recommendationObject.prompt_hint : "";
   return (
     <div className="rounded-lg border border-blue-200 bg-blue-50 p-4">
       <p className="text-sm font-medium text-slate-950">Next iteration</p>

@@ -11,6 +11,16 @@ node_modules/
 .next/
 dist/
 build/
+.logs/
 storage/
 videos/
 *.log
+*.mp4
+*.mov
+*.webm
+*.m4a
+*.wav
+*.zip
+*.tar
+*.tar.gz
+.DS_Store

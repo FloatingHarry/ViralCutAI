@@ -1,5 +1,11 @@
-export const API_BASE =
-  process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "") ?? "http://localhost:8000";
+function defaultApiBase() {
+  if (typeof window !== "undefined" && window.location.hostname) {
+    return `${window.location.protocol}//${window.location.hostname}:8000`;
+  }
+  return "http://localhost:8000";
+}
+
+export const API_BASE = process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "") ?? defaultApiBase();
 
 export type GenerationRunRequest = {
   generation_mode?: "viral_rewrite" | "template_fusion" | "auto_mix";

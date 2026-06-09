@@ -7,7 +7,7 @@ ViralCutAI should keep the LangGraph product flow stable and swap only the provi
 Local secrets live in the project root:
 
 ```text
-D:\Desktop\viralcutai\.env.local
+.env.local
 ```
 
 This file is ignored by Git through `.gitignore` and must never be committed. Use `.env.example` as the public template only.
@@ -30,7 +30,10 @@ The runtime uses automatic provider selection. If a provider has the required ke
 
 ```env
 DATABASE_URL=postgresql+psycopg://viralcutai:viralcutai@localhost:5432/viralcutai
-API_CORS_ORIGINS=http://localhost:3000
+API_CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
+
+# Copy this file to .env.local and fill provider credentials locally.
+# Do not commit .env.local or real provider keys.
 VOLCENGINE_API_KEY=
 VOLCENGINE_BASE_URL=
 # Text / chat endpoint for strategy, script, image prompt planning, and experiments.
@@ -78,6 +81,8 @@ For image generation, `VOLCENGINE_IMAGE_MODEL` is required. If it is not set, th
 Seedance 1.5 is treated as a 4-12 second video provider. Studio defaults to 12 seconds, and `GenerationRunCreate.duration_seconds` validates the same 4-12 second range.
 
 FastMoss import is exposed as the internal backend endpoint `POST /viral-videos/import-fastmoss`. The backend supports direct API-key bearer auth through `FASTMOSS_API_KEY`, and also supports exchanging `client_id` / `client_secret` for an access token when those credentials are provided. It calls `POST /video/v1/search` with `filter.is_ecommerce = 1`, and stores only structured analysis, public video URL, cover URL, and metrics. These records are marked `fastmoss_structured_only` with `visual_verified=false`; they do not claim observed footage.
+
+The public repo ships bundled demo seed data under `apps/api/app/static`: Aurora Glow product assets, 17 owner-curated viral-library references, 136 factors, and local cover thumbnails. Reviewers can load the full demo set with `POST /demo-data/seed`. Local uploaded assets, generated MP4 files, logs, and run artifacts still live in the local database or `storage/` and are intentionally not included in GitHub downloads.
 
 Selected FastMoss references can be upgraded with `POST /viral-videos/{reference_id}/attach-source-video`. The owner manually downloads or obtains the MP4, uploads it as multipart `file`, and the backend stores it under `storage/` as an `owner_viral_reference` Asset. FFmpeg keyframes and Volcengine frame understanding are then combined with FastMoss metrics to regenerate factors marked `owner_viral_verified`. The source footage remains internal evidence only and is not copied into generated videos.
 
